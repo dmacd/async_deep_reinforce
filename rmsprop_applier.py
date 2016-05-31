@@ -91,7 +91,14 @@ class RMSPropApplier(object):
   # and values might tend to be overwritten with results from other threads.
   # (Need to check the learning performance with replacing it)
   def apply_gradients(self, var_list, accum_grad_list, name=None):
+    """
+    :param var_list:
+    :param accum_grad_list:
+    :param name:
+    :return: update_op, summary_op
+    """
     update_ops = []
+    summary_ops = []
 
     with tf.device(self._device):
       with tf.control_dependencies(None):
@@ -99,8 +106,44 @@ class RMSPropApplier(object):
 
       with tf.op_scope([], name, self._name) as name:
         self._prepare()
-        for var, accum_grad in zip(var_list, accum_grad_list):
+
+        # new: clip all gradients by their global norm
+
+        # NB: slightly slower since global norm needs to be computed over all tensors at once;
+
+        clipped_accum_grad_list, global_norm = tf.clip_by_global_norm(accum_grad_list,
+                                                         self._clip_norm,
+                                                         name="clip_by_global_norm")
+        # print "**************************************************************************"
+        # print "accum_grad_list: ", accum_grad_list
+        # print "clipped_accum_grad_list: ", clipped_accum_grad_list
+        # print "**************************************************************************"
+
+        for var, accum_grad, clipped_accum_grad in zip(var_list, accum_grad_list, clipped_accum_grad_list):
+
           with tf.name_scope("update_" + var.op.name), tf.device(var.device):
-            clipped_accum_grad = tf.clip_by_norm(accum_grad, self._clip_norm)
+            # clipped_accum_grad = tf.clip_by_norm(accum_grad, self._clip_norm) # taken care of by global scaling now
             update_ops.append(self._apply_dense(clipped_accum_grad, var))
-        return tf.group(*update_ops, name=name)
+
+            # add in summaries. slight hack
+            # print("apply_gradients adding histogram summary: %s, %s" % (var.name, var.op.name))
+            summary_ops += [tf.histogram_summary(name + "clipped_accum_grad/" + var.op.name + "<-" + accum_grad.name, clipped_accum_grad)]
+            summary_ops += [tf.histogram_summary(name + "accum_grad/"         + var.op.name + "<-" + accum_grad.name, accum_grad)]
+
+        return tf.group(*update_ops, name=name), tf.merge_summary(summary_ops)
+
+
+
+""" questions:
+
+how do i know the right gradients get applied to the right variables?
+
+how do i know momentum is updated right?
+
+- can print out value of momentum slot before and after an apply i guess
+
+
+why were there so many apply ops in the first place?
+
+rms apply should only apply to global thread...
+"""
