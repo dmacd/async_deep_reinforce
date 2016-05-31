@@ -244,7 +244,7 @@ def vis_network_thread(network):
 
     global stop_requested
     global global_t
-    from a3c_training_thread import choose_action
+    #from a3c_training_thread import choose_action
     env = gym.make(constants.GYM_ENV)
 
     game_state = gym_game_state.GymGameState(0, display=True, no_op_max=0, env=env)  # resets env already
@@ -267,7 +267,8 @@ def vis_network_thread(network):
         pi_values, v, lstm_state = network.run(sess, game_state.s_t, lstm_state)
 
         # what the learner does
-        action = choose_action(pi_values)
+        # action = choose_action(pi_values)
+        action = network.sample_action(pi_values)
 
         # audition mode: always make the best choice
         #action = pi_values.tolist().index(max(pi_values))

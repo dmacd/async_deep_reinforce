@@ -56,7 +56,6 @@ longer tmax seems to help it learn more from initially rare rewards
 
 
 
-
 # SCREW YOU GUYS
 
 
@@ -70,5 +69,10 @@ locomotion tasks we reward forward action and penalize hard impacts to encourage
 than hopping gaits (Schulman et al., 2015b). In addition, we used a negative reward and early
 termination for falls which were determined by simple threshholds on the height and torso angle (in
 the case of walker2d).
+
+
+
+
+# continuous domain control tasks
 
 

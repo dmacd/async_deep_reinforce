@@ -3,8 +3,8 @@
 # -*- coding: utf-8 -*-
 import tensorflow as tf
 import numpy as np
-
-
+import math
+import random
 
 # utils
 
@@ -43,10 +43,11 @@ def get_lstm_vars_from_scope(scope):
 
 class LowDimACNetwork(object):
     def __init__(self,
-                 action_size,
+                 action_size, # either number of discrete actions or number of dimensions, depending on mode
                  input_size,
                  hidden_sizes=[200],
                  lstm_sizes=[128],
+                 continuous_mode=False,
                  network_name="default",
                  device="/cpu:0"):
 
@@ -62,10 +63,7 @@ class LowDimACNetwork(object):
         self.lstm_initial_state_value = None
         self.lstm_last_output_state_value = None # caches last lstm output state for convenience of training thread which is managing it for now
 
-
         self._network_name = network_name # outer name scope for all graph variables. *should* be unique for all networks
-
-
 
         self._device = device
 
@@ -73,8 +71,13 @@ class LowDimACNetwork(object):
         self._param_summary_op = None
         self.loss_summary_op = None
 
+        self._continuous_mode = continuous_mode
+        # TODO: setup sampling functions
+        self._sample_action_fn = sample_continuous_action if self._continuous_mode else sample_discrete_action
 
         self.setup_graph()
+
+
 
     @property
     def action_size(self):
@@ -93,8 +96,8 @@ class LowDimACNetwork(object):
                                network_name=network_name if network_name else self.network_name(),
                                # fc0_size=self._fc0_size,
                                # fc1_size=self._fc1_size,
+                               continuous_mode=self._continuous_mode,
                                device=self._device)
-
 
     def variable_summaries(self, var, name):
         l = []
@@ -220,16 +223,29 @@ class LowDimACNetwork(object):
                     input_size = self._lstm_sizes[0]
 
 
-            W_pi, b_pi, pi = self._fc_layer(x, input_size, self._action_size, activation=tf.nn.softmax, name="pi")
-            layers.append((W_pi, b_pi, pi, "pi"))
+            if self._continuous_mode:
+                # continuous output config
+                W_mu, b_mu, mu = self._fc_layer(x, input_size, self._action_size, activation=tf.identity, name="mu")
+                layers.append((W_mu, b_mu, mu, "mu"))
+
+                W_sigma2, b_sigma2, sigma2 = self._fc_layer(x, input_size, 1, activation=tf.nn.softplus, name="sigma^2")
+                layers.append((W_sigma2, b_sigma2, sigma2, "sigma^2"))
+
+                self.mu = mu
+                self.sigma2 = sigma2
+
+            else:
+                # discrete output confif
+                W_pi, b_pi, pi = self._fc_layer(x, input_size, self._action_size, activation=tf.nn.softmax, name="pi")
+                layers.append((W_pi, b_pi, pi, "pi"))
+
+                self.pi = pi
 
 
             ### UMMM...THIS OUTPUT SHOULD BE SCALAR, NO?
             W_v, b_v, v = self._fc_layer(x, input_size, 1, activation=tf.identity, name="v")
             layers.append((W_v, b_v, v, "v"))
 
-
-            self.pi = pi
             self.v = v
             self._layers = layers
 
@@ -245,31 +261,14 @@ class LowDimACNetwork(object):
         self._param_summary_op = tf.merge_summary(self._param_summaries)
 
 
-
-
     def prepare_loss(self, entropy_beta):
+
         with tf.device(self._device), tf.name_scope(self.network_name):
-            # taken action (input for policy)
-            self.a = tf.placeholder("float", [1, self.action_size],name="sparse_action")
+            if self._continuous_mode:
+                policy_loss, entropy = self._prepare_policy_loss_continuous(entropy_beta)
+            else:
+                policy_loss, entropy = self._prepare_policy_loss_discrete(entropy_beta)
 
-            # temporary difference (R-V) (input for policy)
-            self.td = tf.placeholder("float", [1],name="temporal_difference" )
-            # policy entropy
-            entropy = -tf.reduce_sum(self.pi * safe_log(self.pi), name="entropy") # DJM: avoid NaN when policy becomes overly deterministic!
-
-            # policy loss (output)  (add minus, because this is for gradient ascent)
-            # ORIG
-            # policy_loss = -( tf.reduce_sum( tf.mul( safe_log(self.pi), self.a ) ) * self.td +
-            #                      entropy * entropy_beta )
-
-            # maybe loss fn should be positive??
-            # policy_loss = ( -tf.reduce_sum( tf.mul( safe_log(self.pi), self.a ) ) * self.td +
-            #                      entropy * entropy_beta )
-
-
-            # more accurate expression: entropy is treated as a reward and should have same sign as R in td = R-V
-            policy_loss = ( -tf.reduce_sum( tf.mul( safe_log(self.pi), self.a ) ) * (self.td +
-                                 entropy * entropy_beta ))
 
             # R (input for value)
             self.r = tf.placeholder("float", [1],name="reward")
@@ -291,23 +290,104 @@ class LowDimACNetwork(object):
 
             self.loss_summary_op = tf.merge_summary(l)
 
-    def run(self, sess, s_t, lstm_state):
 
+    def _multivariate_normal_pdf(self, x, mean, var):
+        n = tf.size(mean)
+        C =  1/(tf.sqrt(tf.pow(2*math.pi,n )*var))
+        E = tf.exp(-0.5 * (1/var) * tf.squared_difference(x, mean))
+        return C*E
+
+    def _multivariate_normal_log_pdf(self, x, mean, var):
+
+        pass
+
+    def _prepare_policy_loss_continuous(self, entropy_beta):
+        ## TODO: double check the loss form...from original sources. not sure what the scope of the derivative operator is...
+
+        # taken action (input for policy)
+        self.a = tf.placeholder("float", [1, self.action_size],name="sparse_action")
+
+        # temporary difference (R-V) (input for policy)
+        self.td = tf.placeholder("float", [1],name="temporal_difference" )
+
+        # policy entropy
+        entropy = -0.5*(safe_log(2*math.pi*self.sigma2)+1) # +1???
+
+        # TODO: make sure entropy_beta ends up around 1e-4 as per the paper
+
+        # policy probablity pi(a | s_t, theta)
+        sampled_action_probability = self._multivariate_normal_pdf(self.a, self.mu, self.sigma2)
+
+        policy_loss = safe_log(sampled_action_probability) * (self.td + entropy * entropy_beta)
+
+        # TODO: improve efficiency by applying the log probability
+        # https://www.cs.cmu.edu/~epxing/Class/10701-08s/recitation/gaussian.pdf
+        return policy_loss, entropy
+
+
+    def _prepare_policy_loss_discrete(self, entropy_beta):
+        # taken action (input for policy)
+        self.a = tf.placeholder("float", [1, self.action_size],name="sparse_action")
+
+        # temporary difference (R-V) (input for policy)
+        self.td = tf.placeholder("float", [1],name="temporal_difference" )
+        # policy entropy
+        entropy = -tf.reduce_sum(self.pi * safe_log(self.pi), name="entropy") # DJM: avoid NaN when policy becomes overly deterministic!
+
+        # more accurate expression: entropy is treated as a reward and should have same sign as R in td = R-V
+        policy_loss = ( -tf.reduce_sum( tf.mul( safe_log(self.pi), self.a ) ) * (self.td +
+                             entropy * entropy_beta ))
+
+        return policy_loss, entropy
+
+
+    def feedback_action(self, action):
+        """Prepares the stored (sampled) action output to be fed back as input ot the loss operation"""
+
+        if (self._continuous_mode):
+            # action is already in the correct form
+            return action
+        else:
+            # action space discrete, action is a single index
+            a = np.zeros([self._action_size])
+            a[action] = 1
+            return a
+
+
+    def run(self, sess, s_t, lstm_state):
+        if self._continuous_mode:
+            return self._run_continuous(sess, s_t, lstm_state)
+        else:
+            return self._run_discrete(sess, s_t, lstm_state)
+
+    def _run_continuous(self, sess, s_t, lstm_state):
+
+        mu_out, sigma2_out, v_out, lstm_state = sess.run([self.mu, self.sigma2, self.v, self.lstm_output_state_tensor],
+                                             feed_dict={
+                                                 self.s: [s_t],
+                                                 self.lstm_current_state_tensor: lstm_state
+                                             })
+
+        # minor hacks...return single policy vector...structure is opaque to callers
+        pi_out = np.concatenate(mu_out[0], sigma2_out[0])
+        return pi_out[0], v_out[0][0], lstm_state
+
+    def _run_discrete(self, sess, s_t, lstm_state):
         pi_out, v_out, lstm_state = sess.run([self.pi, self.v, self.lstm_output_state_tensor],
                                              feed_dict={
                                                  self.s: [s_t],
                                                  self.lstm_current_state_tensor: lstm_state
                                              })
-        # print "v_out[0]:", v_out[0]
         return pi_out[0], v_out[0][0], lstm_state
 
-    def run_policy(self, sess, s_t):
-        pi_out = sess.run( self.pi, feed_dict = {self.s : [s_t] } )
-        return pi_out[0]
-
-    def run_value(self, sess, s_t):
-        v_out = sess.run( self.v, feed_dict = {self.s : [s_t]} )
-        return v_out[0][0] # output is scalar
+    # deprecated
+    # def run_policy(self, sess, s_t):
+    #     pi_out = sess.run( self.pi, feed_dict = {self.s : [s_t] } )
+    #     return pi_out[0]
+    #
+    # def run_value(self, sess, s_t):
+    #     v_out = sess.run( self.v, feed_dict = {self.s : [s_t]} )
+    #     return v_out[0][0] # output is scalar
 
     def get_vars(self):
 
@@ -338,6 +418,13 @@ class LowDimACNetwork(object):
                     sync_ops.append(sync_op)
 
                 return tf.group(*sync_ops, name=name)
+
+
+    ###############################################################
+    ## actions
+
+    def sample_action(self, pi_):
+        return self._sample_action_fn(pi_)
 
     # weight initialization based on muupan's code
     # https://github.com/muupan/async-rl/blob/master/a3c_ale.py
@@ -447,3 +534,38 @@ class LowDimACNetwork(object):
             self.pi = tf.nn.softmax(tf.matmul(h_fc1, self.W_fc2) + self.b_fc2)
             # value (output)
             self.v = tf.matmul(h_fc1, self.W_fc3) + self.b_fc3
+
+
+def sample_discrete_action(pi_):
+    return choose_action(pi_)
+
+# todo: surely there is a builtin np function for this
+
+# TODO: use builtin np fn
+# TODO: encapsulate this in the network class so sampling methods and action representation can be decoupled from training process
+def choose_action(pi_values):
+    values = []
+    sum = 0.0
+    for rate in pi_values:
+        sum = sum + rate
+        value = sum
+        values.append(value)
+
+    r = random.random() * sum
+    for i in range(len(values)):
+        if values[i] >= r:
+            return i
+    # fail safe
+    return len(values) - 1
+
+
+def sample_continuous_action(pi_values):
+    """
+    :param pi_values: concatenated vector [sigma^2, mu_1, mu_2, ... m_n]
+    :return: vector of length n sampled from the multidimensional guassian with spherical covariance matrix sigma^2 * I
+    """
+    variance = pi_values[0]
+    mean = pi_values[1:]
+    cov = variance*np.identity(len(mean))
+
+    return np.random.multivariate_normal(mean, cov)

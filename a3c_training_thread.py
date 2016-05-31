@@ -135,8 +135,10 @@ class A3CTrainingThread(object):
             pi_, value_, lstm_state = self.local_network.run(sess, self.game_state.s_t,
                                                              lstm_state)
 
+            action = self.local_network.sample_action(pi_)
+
             # pi_ = self.local_network.run_policy(sess, self.game_state.s_t)
-            action = choose_action(pi_)  # self.choose_action(pi_)
+            # action = choose_action(pi_)  # self.choose_action(pi_)
 
             states.append(self.game_state.s_t)
             actions.append(action)
@@ -198,8 +200,10 @@ class A3CTrainingThread(object):
         for (ai, ri, si, Vi, lstm_si) in zip(actions, rewards, states, values, lstm_states):
             R = ri + GAMMA * R
             td = R - Vi
-            a = np.zeros([self.local_network.action_size])
-            a[ai] = 1
+
+            a = self.local_network.feedback_action(ai)
+            # a = np.zeros([self.local_network.action_size])
+            # a[ai] = 1
 
             _, loss_summary = sess.run([self.accum_gradients, self.local_network.loss_summary_op],
                                        feed_dict={
@@ -229,18 +233,3 @@ class A3CTrainingThread(object):
         return diff_local_t
 
 
-# todo: surely there is a builtin np function for this
-def choose_action(pi_values):
-    values = []
-    sum = 0.0
-    for rate in pi_values:
-        sum = sum + rate
-        value = sum
-        values.append(value)
-
-    r = random.random() * sum
-    for i in range(len(values)):
-        if values[i] >= r:
-            return i
-    # fail safe
-    return len(values) - 1
