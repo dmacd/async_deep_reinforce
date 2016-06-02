@@ -99,7 +99,7 @@ x action feedback appears correct also
 - check policy pdf computed properly...check by hand
 
 - check if train.minimize is minimizing abs val or magnitude
-
+    !!!!!! or if policy loss should be able to be positive for that matter??? !!!!!!!
 
 - initialize weight values much smaller so we are less likely to start in a divergent setting?
 
@@ -167,3 +167,6 @@ verification checks:
 
 
 Added (!) lstm state reset
+
+- looks more promising initially....
+

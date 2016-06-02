@@ -191,7 +191,7 @@ class A3CTrainingThread(object):
                 self.game_state.reset()
 
                 #  ugh. reset lstm state!
-                lstm_state = self.local_network.lstm_initial_state_value()
+                lstm_state = self.local_network.lstm_initial_state_value
 
                 break
 

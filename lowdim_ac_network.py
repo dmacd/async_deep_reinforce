@@ -61,7 +61,7 @@ class LowDimACNetwork(object):
         self.lstm_output_state_tensors = []
 
         # for now these are shared
-        self._lstm_initial_state_value = None
+        self._lstm_initial_state_value = []
         # self.lstm_last_output_state_value = None # caches last lstm output state for convenience of training thread which is managing it for now
 
         self._network_name = network_name # outer name scope for all graph variables. *should* be unique for all networks
@@ -212,6 +212,9 @@ class LowDimACNetwork(object):
                         y, output_state_tensor = lstm(x, current_state_tensor)
                         self.lstm_output_state_tensors.append(output_state_tensor)
 
+                        # setup initial state
+                        self._lstm_initial_state_value.append(np.zeros(dtype="float32",shape=[batch_size, lstm.state_size ]))
+
                         # retrieve variables
                         Ws, Bs = get_lstm_vars_from_scope(vs)
                         #  we arent equipped to deal with more complex setups yet
@@ -267,8 +270,8 @@ class LowDimACNetwork(object):
             # probably want better encapsulation of network state
 
             # TODO: HACK: not general for multple lstm layers or sizes
-            self._lstm_initial_state_value = [np.zeros(dtype="float32",shape=[batch_size, self._lstm_sizes[0] ])]*len(self.lstm_current_state_tensors)
-
+            #  todo: cleanup
+            # lstm_state_size = self._lstm_sizes[0]*2 # TOTAL HACK: this really needs to come from the lstm iteslf
             # self.lstm_last_output_state_value = [self.lstm_initial_state_value]*len(self.lstm_current_state_tensors) # TODO: cleanup...is this used anywhere?
 
             # print "initialized last_output_state_value: ", self.lstm_last_output_state_value
@@ -366,6 +369,8 @@ class LowDimACNetwork(object):
 
         policy_loss = safe_log(sampled_action_probability) * (self.td + entropy * entropy_beta)
 
+
+        policy_loss = -policy_loss    # maybe this will be slightly better if we have the wrong gradients being computed
         # print "-----------------------------------------"
         # print "entropy              ", entropy
         # print "sampled action prob  ", sampled_action_probability
@@ -434,7 +439,7 @@ class LowDimACNetwork(object):
         for i, state in enumerate(lstm_states):
             d[self.lstm_current_state_tensors[i]] = state
 
-        print "loss_feed_dict", d
+        # print "loss_feed_dict", d
         return d
 
     def _run_feed_dict(self, s_t, lstm_states):
@@ -443,7 +448,7 @@ class LowDimACNetwork(object):
 
             d[self.lstm_current_state_tensors[i]] = state
 
-        print "_run_feed_dict", d
+        # print "_run_feed_dict", d
         return d
 
     def _run_continuous(self, sess, s_t, lstm_state):
@@ -478,9 +483,9 @@ class LowDimACNetwork(object):
 
         # minor hacks...return single policy vector...structure is opaque to callers
 
-        print "run_continuous: mu_out=", mu_out, " sigma2_out=", sigma2_out
+        # print "run_continuous: mu_out=", mu_out, " sigma2_out=", sigma2_out
         pi_out = np.concatenate([sigma2_out[0], mu_out[0]], axis=0)
-        print "pi_out=", pi_out
+        # print "pi_out=", pi_out
         return pi_out, v_out[0][0], lstm_state
 
     def _run_discrete(self, sess, s_t, lstm_state):

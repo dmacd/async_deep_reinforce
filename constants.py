@@ -28,9 +28,9 @@ CONTINUOUS_MODE = True
 
 if CONTINUOUS_MODE:
     # continuous envs
-    # GYM_ENV="InvertedPendulum-v1"
+    GYM_ENV="InvertedPendulum-v1"
     # GYM_ENV="HalfCheetah-v1"        # doesnt even have episode structure
-    GYM_ENV="Reacher-v1"
+    # GYM_ENV="Reacher-v1"
 
 else:
     GYM_ENV="CartPole-v0"
