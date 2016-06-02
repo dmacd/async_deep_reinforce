@@ -80,12 +80,16 @@ print("Env observation space:", env.observation_space)
 input_size = len(env.observation_space.sample().flatten())
 
 # HACK: only works on discrete action spaces
-action_size = env.action_space.n
+if constants.CONTINUOUS_MODE:
+    action_size = env.action_space.shape[0]
+else:
+    action_size = env.action_space.n
 
-global_network = LowDimACNetwork(action_size=action_size,
+global_network = LowDimACNetwork(continuous_mode=constants.CONTINUOUS_MODE,
+                                 action_size=action_size,
                                  input_size=input_size,
-                                 hidden_sizes=[16],
-                                 lstm_sizes=[16],
+                                 hidden_sizes=[128],
+                                 lstm_sizes=[128],
                                  network_name="global-net",
                                  device=device)
 

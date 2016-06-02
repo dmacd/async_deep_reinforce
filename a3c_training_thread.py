@@ -57,6 +57,8 @@ class A3CTrainingThread(object):
 
         self.episode_reward = 0
 
+        self.lstm_last_output_state = None          # cache last lstm hidden states here
+
     def _anneal_learning_rate(self, global_time_step):
         learning_rate = self.initial_learning_rate * (
         self.max_global_time_step - global_time_step) / self.max_global_time_step
@@ -86,14 +88,15 @@ class A3CTrainingThread(object):
     #     summary_writer.add_summary(summary_str, global_t)
 
     """next steps
-      init the lstm state before process is called, somewhere
+      x init the lstm state before process is called, somewhere
 
-      reinit lstm state after terminal episodes
+      x reinit lstm state after terminal episodes
 
-      allow lstm state to persist even after global weights are copied (i guess)
+      ?!? allow lstm state to persist even after global weights are copied (i guess)
 
-      feed state in to lstm during policy evals
+      x feed state in to lstm during policy evals
       how does state work in gradient backups?
+
 
 
         Tests:
@@ -127,7 +130,13 @@ class A3CTrainingThread(object):
 
         # resume with wherever we left off on last time through the action loop
         # TODO: no reason the network itself current should care about this
-        lstm_state = self.local_network.lstm_last_output_state_value
+
+        if (self.lstm_last_output_state is None):
+            self.lstm_last_output_state = self.local_network.lstm_initial_state_value
+
+        lstm_state = self.lstm_last_output_state
+
+        # lstm_state = self.local_network.lstm_last_output_state_value
 
         # t_max times loop
         for i in range(LOCAL_T_MAX):
@@ -137,6 +146,8 @@ class A3CTrainingThread(object):
 
             action = self.local_network.sample_action(pi_)
 
+            # print "a3c train: pi_: ", pi_
+            # print "a3c train: action: ", action
             # pi_ = self.local_network.run_policy(sess, self.game_state.s_t)
             # action = choose_action(pi_)  # self.choose_action(pi_)
 
@@ -178,6 +189,10 @@ class A3CTrainingThread(object):
 
                 self.episode_reward = 0
                 self.game_state.reset()
+
+                #  ugh. reset lstm state!
+                lstm_state = self.local_network.lstm_initial_state_value()
+
                 break
 
         R = 0.0
@@ -186,7 +201,8 @@ class A3CTrainingThread(object):
 
             _, R, _ = self.local_network.run(sess, self.game_state.s_t, lstm_state)
 
-        self.local_network.lstm_last_output_state_value = lstm_state # preserve for next time through the loop
+        # self.local_network.lstm_last_output_state_value = lstm_state # preserve for next time through the loop
+        self.lstm_last_output_state = lstm_state
 
         actions.reverse()
         states.reverse()
@@ -206,13 +222,15 @@ class A3CTrainingThread(object):
             # a[ai] = 1
 
             _, loss_summary = sess.run([self.accum_gradients, self.local_network.loss_summary_op],
-                                       feed_dict={
-                                           self.local_network.s: [si],
-                                           self.local_network.a: [a],
-                                           self.local_network.td: [td],
-                                           self.local_network.r: [R],
-                                           self.local_network.lstm_current_state_tensor: lstm_si
-                                       })
+                                       feed_dict=self.local_network.loss_feed_dictionary(si, a, td, R, lstm_si)
+                                       # feed_dict={
+                                       #     self.local_network.s: [si],
+                                       #     self.local_network.a: [a],
+                                       #     self.local_network.td: [td],
+                                       #     self.local_network.r: [R],
+                                       #     self.local_network.lstm_current_state_tensor: lstm_si
+                                       # }
+                                       )
 
             if (self.thread_index == 0):
                 summary_writer.add_summary(loss_summary, global_step=global_t)

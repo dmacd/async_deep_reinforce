@@ -76,3 +76,94 @@ the case of walker2d).
 # continuous domain control tasks
 
 
+## InvertedPendulum-v1
+
+seems to begin to learn but diverge shortly thereafter, h=16, lstm=16 and h=32, lstm=32
+
+symptoms: score -> 1, actions grow >> box bounds
+
+turned down learning rate to 10^-4
+
+
+basic questions:
+
+x am i sampling the actions correctly? mu and sigma^2 mixed up?
+  x checked that
+x action feedback appears correct also
+- learning rate still too high?
+    - trying .5e-4 w/ 128h, 128lstm network
+        - still failed. score never increased after 300k iterations
+- fixed entropy term...sort of?
+    - was prevented from being negative before, now is initially...and could easily remain so depending on the variance...think this needs more thought
+
+- check policy pdf computed properly...check by hand
+
+- check if train.minimize is minimizing abs val or magnitude
+
+
+- initialize weight values much smaller so we are less likely to start in a divergent setting?
+
+
+- initial sampled action space applied to env may make some tasks impossible out of the game?
+
+## HalfCheetah-v1
+
+x clip actions to space so simulation doesnt get fucked...completely
+    - nope, still flips over and gets fucked right off the bat
+
+- rethink intialization...how can i possible have a general algorithm that avoids jumping in to horrible regions of solution space right off the bat?
+    - understand what the actions individually represent
+    - select safe values within that space
+
+- need to reset after get in to a bad state
+
+## Reacher-v1
+
+
+noticed intial behavior is wild and fast...maybe weights too large?
+does slow down though
+
+- decrease initial weight magnitudes by a bunch
+  `[-1,+1]/sqrt(inputs)` --> `[-1,-1]/inputs**2`
+
+- make reacher-v1.djm - reset location on success. unclear why this doesnt happen now
+
+    - may need to update gym to get reward thresholds pulled in
+
+
+- maaaybe? cost function has wrong sign/ "minimize" will go too far when rewards are all negative
+
+
+*almost* converged after 3 hours...but diverged again after a period of good perf
+
+
+Retrying with
+
+- higher learning rate
+- Tmax=100 (> episode timestep limit)
+
+nope.
+
+Retrying with:
+
+- slightly fixed loss function (variance normalization term exponent was missing)
+- 32h,32lstm network again
+- higher learning rate (7e-4)
+- Tmax=100
+
+- marginally better perf, was sorta learning kinda
+
+
+
+Retrying with: split V, sigma, and mu networks
+
+
+
+verification checks:
+
+- printlns
+- inspect graph structure
+-
+
+
+Added (!) lstm state reset

@@ -57,11 +57,12 @@ class LowDimACNetwork(object):
         self._lstm_sizes = lstm_sizes
 
         # more lstm bookkeeping
-        self.lstm_current_state_tensor = None
-        self.lstm_output_state_tensor = None
+        self.lstm_current_state_tensors = []
+        self.lstm_output_state_tensors = []
 
-        self.lstm_initial_state_value = None
-        self.lstm_last_output_state_value = None # caches last lstm output state for convenience of training thread which is managing it for now
+        # for now these are shared
+        self._lstm_initial_state_value = None
+        # self.lstm_last_output_state_value = None # caches last lstm output state for convenience of training thread which is managing it for now
 
         self._network_name = network_name # outer name scope for all graph variables. *should* be unique for all networks
 
@@ -177,65 +178,74 @@ class LowDimACNetwork(object):
             self.s = tf.placeholder("float", [1, self._input_size, input_history]) #[1, 84, 84, 4])
 
             # flattened input, no convolution here
-            state_flat = tf.reshape(self.s, [1, self._input_size*input_history])
+            input_state_flat = tf.reshape(self.s, [1, self._input_size*input_history])
 
             layers = []
-            x = state_flat
+            # x = state_flat
             input_size = self._input_size*input_history
-            for idx, hidden_size in enumerate(self._hidden_sizes):
-                layer_name = "fc%d" % idx
-                W, b, y = self._fc_layer(x, input_size, hidden_size, activation=tf.nn.relu, name=layer_name)
-                layers.append((W,b,y,layer_name))
 
-                # feed last output in to next layer
-                x = y
-                input_size = hidden_size
+            def hidden_layers(x, input_size, name):
+                for idx, hidden_size in enumerate(self._hidden_sizes):
+                    layer_name = name+"/"+"fc%d" % idx
+                    W, b, y = self._fc_layer(x, input_size, hidden_size, activation=tf.nn.relu, name=layer_name)
+                    layers.append((W,b,y,layer_name))
 
-
-            # now set up lstm layer(s)
-
-            if (len(self._lstm_sizes) > 0):
-                assert len(self._lstm_sizes) == 1
-                layer_name = self.network_name + "/lstm0"
-                with tf.variable_scope(layer_name) as vs:
-                    # just 1 for now
-                    lstm = tf.nn.rnn_cell.BasicLSTMCell(self._lstm_sizes[0])
-                    # todo: append stats somehow
-
-                    self.lstm_current_state_tensor = tf.placeholder("float", [batch_size, lstm.state_size])
-                                                            #tf.zeros([batch_size, lstm.state_size])
-
-                    y, self.lstm_output_state_tensor = lstm(x, self.lstm_current_state_tensor)
-
-                    # retrieve variables
-                    Ws, Bs = get_lstm_vars_from_scope(vs)
-                    #  we arent equipped to deal with more complex setups yet
-                    # print "lstm Ws:", Ws
-                    assert len(Ws) == 1
-                    assert len(Bs) == 1
-                    # manually add variable summaries
-                    self.variable_summaries(Ws[0], "W_%s" % layer_name)
-                    self.variable_summaries(Bs[0], "b_%s" % layer_name)
-
-
-                    layers.append((Ws[0],Bs[0],y,layer_name))
+                    # feed last output in to next layer
                     x = y
-                    input_size = self._lstm_sizes[0]
+                    input_size = hidden_size
 
+
+                # now set up lstm layer(s)
+
+                if (len(self._lstm_sizes) > 0):
+                    assert len(self._lstm_sizes) == 1
+                    layer_name = self.network_name + "/" + name + "/lstm0"
+                    with tf.variable_scope(layer_name) as vs:
+                        # just 1 for now
+                        lstm = tf.nn.rnn_cell.BasicLSTMCell(self._lstm_sizes[0])
+                        # todo: append stats somehow
+
+                        current_state_tensor = tf.placeholder("float", [batch_size, lstm.state_size])
+                        self.lstm_current_state_tensors.append(current_state_tensor)
+                                                                #tf.zeros([batch_size, lstm.state_size])
+
+                        y, output_state_tensor = lstm(x, current_state_tensor)
+                        self.lstm_output_state_tensors.append(output_state_tensor)
+
+                        # retrieve variables
+                        Ws, Bs = get_lstm_vars_from_scope(vs)
+                        #  we arent equipped to deal with more complex setups yet
+                        # print "lstm Ws:", Ws
+                        assert len(Ws) == 1
+                        assert len(Bs) == 1
+                        # manually add variable summaries
+                        self.variable_summaries(Ws[0], "W_%s" % layer_name)
+                        self.variable_summaries(Bs[0], "b_%s" % layer_name)
+
+                        layers.append((Ws[0],Bs[0],y,layer_name))
+                        x = y
+                        input_size = self._lstm_sizes[0]
+
+                return x, input_size
 
             if self._continuous_mode:
                 # continuous output config
-                W_mu, b_mu, mu = self._fc_layer(x, input_size, self._action_size, activation=tf.identity, name="mu")
+
+                hidden_mu_output, hidden_mu_output_size = hidden_layers(input_state_flat, input_size, name="mu_net")
+                W_mu, b_mu, mu = self._fc_layer(hidden_mu_output, hidden_mu_output_size, self._action_size, activation=tf.identity, name="mu")
                 layers.append((W_mu, b_mu, mu, "mu"))
 
-                W_sigma2, b_sigma2, sigma2 = self._fc_layer(x, input_size, 1, activation=tf.nn.softplus, name="sigma^2")
-                layers.append((W_sigma2, b_sigma2, sigma2, "sigma^2"))
+                hidden_sigma2_output, hidden_sigma2_output_size = hidden_layers(input_state_flat, input_size, name="sigma2_net")
+                W_sigma2, b_sigma2, sigma2 = self._fc_layer(hidden_sigma2_output, hidden_sigma2_output_size, 1, activation=tf.nn.softplus, name="sigma2")
+                layers.append((W_sigma2, b_sigma2, sigma2, "sigma2"))
 
                 self.mu = mu
                 self.sigma2 = sigma2
 
             else:
                 # discrete output confif
+                x, input_size = hidden_layers(input_state_flat, input_size, name="discrete")
+
                 W_pi, b_pi, pi = self._fc_layer(x, input_size, self._action_size, activation=tf.nn.softmax, name="pi")
                 layers.append((W_pi, b_pi, pi, "pi"))
 
@@ -243,7 +253,9 @@ class LowDimACNetwork(object):
 
 
             ### UMMM...THIS OUTPUT SHOULD BE SCALAR, NO?
-            W_v, b_v, v = self._fc_layer(x, input_size, 1, activation=tf.identity, name="v")
+
+            hidden_v_output, hidden_v_output_size = hidden_layers(input_state_flat, input_size, name="V_net")
+            W_v, b_v, v = self._fc_layer(hidden_v_output, hidden_v_output_size, 1, activation=tf.identity, name="v")
             layers.append((W_v, b_v, v, "v"))
 
             self.v = v
@@ -254,20 +266,28 @@ class LowDimACNetwork(object):
             # slight hax caching these here..:
             # probably want better encapsulation of network state
 
-            self.lstm_initial_state_value = np.zeros(dtype="float32",shape=[batch_size, lstm.state_size])
-            self.lstm_last_output_state_value = self.lstm_initial_state_value
+            # TODO: HACK: not general for multple lstm layers or sizes
+            self._lstm_initial_state_value = [np.zeros(dtype="float32",shape=[batch_size, self._lstm_sizes[0] ])]*len(self.lstm_current_state_tensors)
+
+            # self.lstm_last_output_state_value = [self.lstm_initial_state_value]*len(self.lstm_current_state_tensors) # TODO: cleanup...is this used anywhere?
+
+            # print "initialized last_output_state_value: ", self.lstm_last_output_state_value
 
 
         self._param_summary_op = tf.merge_summary(self._param_summaries)
 
 
+    @property
+    def lstm_initial_state_value(self):
+        return self._lstm_initial_state_value
+
     def prepare_loss(self, entropy_beta):
 
         with tf.device(self._device), tf.name_scope(self.network_name):
             if self._continuous_mode:
-                policy_loss, entropy = self._prepare_policy_loss_continuous(entropy_beta)
+                policy_loss, entropy, summaries = self._prepare_policy_loss_continuous(entropy_beta)
             else:
-                policy_loss, entropy = self._prepare_policy_loss_discrete(entropy_beta)
+                policy_loss, entropy, summaries = self._prepare_policy_loss_discrete(entropy_beta)
 
 
             # R (input for value)
@@ -282,50 +302,88 @@ class LowDimACNetwork(object):
 
             # todo: unclear if i really need these
             l = []
+            l.extend(summaries)
             l += [tf.scalar_summary(["R"], self.r)]
             l += [tf.scalar_summary(["(R-V)"], self.td)]
-            l += [tf.scalar_summary("entropy", entropy)]
-            l += [tf.scalar_summary(["policy_loss"], policy_loss)]
+            l += [tf.scalar_summary(["entropy"], tf.reshape(entropy, (1,)))]
+            l += [tf.scalar_summary(["policy_loss"], tf.reshape(policy_loss, (1,)))]    # TODO: HACK: when we do batch mode, will want a histogram and ditch the reshape, most likely?
             l += [tf.scalar_summary("value_loss", value_loss)]
 
             self.loss_summary_op = tf.merge_summary(l)
 
 
     def _multivariate_normal_pdf(self, x, mean, var):
-        n = tf.size(mean)
-        C =  1/(tf.sqrt(tf.pow(2*math.pi,n )*var))
-        E = tf.exp(-0.5 * (1/var) * tf.squared_difference(x, mean))
+        n = tf.cast(tf.size(mean), tf.float32)
+        var_to_the_n = tf.pow(var, n)
+
+        C = 1/(tf.sqrt(tf.pow(2*math.pi, n)*var_to_the_n))
+        E = tf.exp((-0.5 * (1/var_to_the_n) \
+                    * tf.reduce_sum(tf.squared_difference(x, mean), reduction_indices=(1,)))) # leave batch size alone...i hope?
+
+
+
+        # print "//////////////////////////////////////"
+        # print "mean     ", mean
+        # print "n        ", n
+        # print "C        ", C
+        # print "var      ", var
+        # print "E        ", E
         return C*E
 
     def _multivariate_normal_log_pdf(self, x, mean, var):
 
-        pass
+        ## TODO: validate & test
+        n = tf.size(mean)
+        var_to_the_n = tf.pow(var, tf.cast(n, tf.float32))
+
+        return \
+            -0.5*n*safe_log(var,arg_min=1e-6, arg_max=float("inf")) + \
+            + (-0.5 * (1/var_to_the_n)) * tf.reduce_sum(tf.squared_difference(x, mean), reduction_indices=(1,))
+
+
 
     def _prepare_policy_loss_continuous(self, entropy_beta):
         ## TODO: double check the loss form...from original sources. not sure what the scope of the derivative operator is...
-
+        summaries = []
         # taken action (input for policy)
-        self.a = tf.placeholder("float", [1, self.action_size],name="sparse_action")
+        self.a = tf.placeholder("float", [1, self.action_size], name="sparse_action")
 
         # temporary difference (R-V) (input for policy)
-        self.td = tf.placeholder("float", [1],name="temporal_difference" )
+        self.td = tf.placeholder("float", [1], name="temporal_difference")
 
         # policy entropy
-        entropy = -0.5*(safe_log(2*math.pi*self.sigma2)+1) # +1???
+        entropy = -0.5*(tf.log(tf.maximum(1e-10, (2*math.pi*self.sigma2)))+1) #  dont clip maximum value of argument
 
         # TODO: make sure entropy_beta ends up around 1e-4 as per the paper
 
         # policy probablity pi(a | s_t, theta)
         sampled_action_probability = self._multivariate_normal_pdf(self.a, self.mu, self.sigma2)
 
+        summaries += [tf.scalar_summary(["P(a)"], tf.reshape(sampled_action_probability, (1,)))]
+
+        # NB: revisit what correct shape should be for this
+        # TODO: HACK: reduce_sum here even though
+
         policy_loss = safe_log(sampled_action_probability) * (self.td + entropy * entropy_beta)
+
+        # print "-----------------------------------------"
+        # print "entropy              ", entropy
+        # print "sampled action prob  ", sampled_action_probability
+        # print "td                   ", self.td
+        # print "policy_loss          ", policy_loss
+        # print "-----------------------------------------"
+
 
         # TODO: improve efficiency by applying the log probability
         # https://www.cs.cmu.edu/~epxing/Class/10701-08s/recitation/gaussian.pdf
-        return policy_loss, entropy
+
+        # reduces to scalar even though it was just a 1-element vector...
+        # TODO: revisit when we try batch mode!
+        return policy_loss, entropy, summaries
 
 
     def _prepare_policy_loss_discrete(self, entropy_beta):
+        summaries = []
         # taken action (input for policy)
         self.a = tf.placeholder("float", [1, self.action_size],name="sparse_action")
 
@@ -338,7 +396,7 @@ class LowDimACNetwork(object):
         policy_loss = ( -tf.reduce_sum( tf.mul( safe_log(self.pi), self.a ) ) * (self.td +
                              entropy * entropy_beta ))
 
-        return policy_loss, entropy
+        return policy_loss, entropy, summaries
 
 
     def feedback_action(self, action):
@@ -360,17 +418,70 @@ class LowDimACNetwork(object):
         else:
             return self._run_discrete(sess, s_t, lstm_state)
 
+    #  feed dictionary construction encapsulation
+    #  needed due to annoying multiplicity of lstm states
+
+    def loss_feed_dictionary(self, si, a, td, R, lstm_states):
+        d = {
+            self.s: [si],
+            self.a: [a],
+            self.td: [td],
+            self.r: [R],
+            # self.lstm_current_state_tensor: lstm_si
+        }
+
+        # add multiple lstm state vectors as necessary
+        for i, state in enumerate(lstm_states):
+            d[self.lstm_current_state_tensors[i]] = state
+
+        print "loss_feed_dict", d
+        return d
+
+    def _run_feed_dict(self, s_t, lstm_states):
+        d = {self.s: [s_t]}
+        for i, state in enumerate(lstm_states):
+
+            d[self.lstm_current_state_tensors[i]] = state
+
+        print "_run_feed_dict", d
+        return d
+
     def _run_continuous(self, sess, s_t, lstm_state):
 
-        mu_out, sigma2_out, v_out, lstm_state = sess.run([self.mu, self.sigma2, self.v, self.lstm_output_state_tensor],
-                                             feed_dict={
-                                                 self.s: [s_t],
-                                                 self.lstm_current_state_tensor: lstm_state
-                                             })
+
+
+        """
+        next step:
+        multiplex lstm state tensors for
+        - eval
+        - returning in combined form
+        - feeding back in
+
+        -- can i get sess.run to give me a map or something better as a result set??
+        """
+        tensors_to_eval = [self.mu, self.sigma2, self.v]
+        tensors_to_eval.extend(self.lstm_output_state_tensors)
+
+        # mu_out, sigma2_out, v_out, lstm_state \
+        outputs = sess.run(tensors_to_eval,
+                           feed_dict=self._run_feed_dict(s_t, lstm_state)
+                                             # feed_dict={
+                                             #     self.s: [s_t],
+                                             #     self.lstm_current_state_tensor: lstm_state
+                                             # }
+                           )
+
+        mu_out = outputs[0]
+        sigma2_out = outputs[1]
+        v_out = outputs[2]
+        lstm_state = outputs[3:]
 
         # minor hacks...return single policy vector...structure is opaque to callers
-        pi_out = np.concatenate(mu_out[0], sigma2_out[0])
-        return pi_out[0], v_out[0][0], lstm_state
+
+        print "run_continuous: mu_out=", mu_out, " sigma2_out=", sigma2_out
+        pi_out = np.concatenate([sigma2_out[0], mu_out[0]], axis=0)
+        print "pi_out=", pi_out
+        return pi_out, v_out[0][0], lstm_state
 
     def _run_discrete(self, sess, s_t, lstm_state):
         pi_out, v_out, lstm_state = sess.run([self.pi, self.v, self.lstm_output_state_tensor],
@@ -431,13 +542,15 @@ class LowDimACNetwork(object):
 
     def _fc_weight_variable(self, shape, name="anon_weight"):
         input_channels = shape[0]
-        d = 1.0 / np.sqrt(input_channels)
+        # d = 1.0 / np.sqrt(input_channels)
+        d = 1.0 / input_channels**2
         initial = tf.random_uniform(shape, minval=-d, maxval=d)
         return tf.Variable(initial, name=name)
 
 
     def _fc_bias_variable(self, shape, input_channels, name="anon_bias"):
-        d = 1.0 / np.sqrt(input_channels)
+        # d = 1.0 / np.sqrt(input_channels)
+        d = 1.0 / input_channels**2
         initial = tf.random_uniform(shape, minval=-d, maxval=d)
         return tf.Variable(initial, name=name)
 
