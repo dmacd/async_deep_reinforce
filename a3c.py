@@ -88,8 +88,8 @@ else:
 global_network = LowDimACNetwork(continuous_mode=constants.CONTINUOUS_MODE,
                                  action_size=action_size,
                                  input_size=input_size,
-                                 hidden_sizes=[32],
-                                 lstm_sizes=[32],
+                                 hidden_sizes=[64],
+                                 lstm_sizes=[64],
                                  network_name="global-net",
                                  device=device)
 

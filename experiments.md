@@ -2,6 +2,9 @@
 
 
 
+
+
+
 ## decent results with cartpole
 
 think we had
@@ -75,6 +78,18 @@ the case of walker2d).
 
 # continuous domain control tasks
 
+## milestones
+
+- validate on multiple tasks, ensure robust implementation
+
+    - half-cheetah should actually train much faster and better...try with larger network
+
+- validate that i can bootstrap with experience replay and elite samples
+    (necessary precondition for unity being a viable simulation environment)
+
+    -
+
+- connect to unity and validate that basic tasks can work there
 
 ## InvertedPendulum-v1
 
@@ -90,32 +105,17 @@ basic questions:
 x am i sampling the actions correctly? mu and sigma^2 mixed up?
   x checked that
 x action feedback appears correct also
-- learning rate still too high?
+x learning rate still too high?
     - trying .5e-4 w/ 128h, 128lstm network
         - still failed. score never increased after 300k iterations
-- fixed entropy term...sort of?
-    - was prevented from being negative before, now is initially...and could easily remain so depending on the variance...think this needs more thought
+    - NOPE: works at 7e-4 w/ grad norm clipped to 10
 
-- check policy pdf computed properly...check by hand
+x initialize weight values much smaller so we are less likely to start in a divergent setting?
 
-- check if train.minimize is minimizing abs val or magnitude
-    !!!!!! or if policy loss should be able to be positive for that matter??? !!!!!!!
+x FIXED WRONG SIGN OF `policy_loss`
 
-- initialize weight values much smaller so we are less likely to start in a divergent setting?
+WORKS. COMMITTED.
 
-
-- initial sampled action space applied to env may make some tasks impossible out of the game?
-
-## HalfCheetah-v1
-
-x clip actions to space so simulation doesnt get fucked...completely
-    - nope, still flips over and gets fucked right off the bat
-
-- rethink intialization...how can i possible have a general algorithm that avoids jumping in to horrible regions of solution space right off the bat?
-    - understand what the actions individually represent
-    - select safe values within that space
-
-- need to reset after get in to a bad state
 
 ## Reacher-v1
 
@@ -123,15 +123,16 @@ x clip actions to space so simulation doesnt get fucked...completely
 noticed intial behavior is wild and fast...maybe weights too large?
 does slow down though
 
-- decrease initial weight magnitudes by a bunch
+x decrease initial weight magnitudes by a bunch
   `[-1,+1]/sqrt(inputs)` --> `[-1,-1]/inputs**2`
 
-- make reacher-v1.djm - reset location on success. unclear why this doesnt happen now
-
+x make reacher-v1.djm - reset location on success. unclear why this doesnt happen now
+    x oops gym has terminal timestep count, implemented auto-reset
     - may need to update gym to get reward thresholds pulled in
 
 
-- maaaybe? cost function has wrong sign/ "minimize" will go too far when rewards are all negative
+x maaaybe? cost function has wrong sign/ "minimize" will go too far when rewards are all negative
+  - YES THIS
 
 
 *almost* converged after 3 hours...but diverged again after a period of good perf
@@ -153,20 +154,92 @@ Retrying with:
 
 - marginally better perf, was sorta learning kinda
 
-
-
 Retrying with: split V, sigma, and mu networks
-
 
 
 verification checks:
 
-- printlns
-- inspect graph structure
--
+x printlns
+x inspect graph structure
 
 
-Added (!) lstm state reset
+x FIXED BUG: lstm state was not reset with env
 
-- looks more promising initially....
+### with 32h,32lstm x mu,sigma2,V nets
+
+converged to local minima and stayed there for 30+minutes. gradients mostly zero.
+
+- try with larger network?
+
+
+## HalfCheetah-v1
+
+x clip actions to space so simulation doesnt get fucked...completely
+    - nope, still flips over and gets fucked right off the bat
+
+x rethink intialization...how can i possible have a general algorithm that avoids jumping in to horrible regions of solution space right off the bat?
+    x understand what the actions individually represent
+    x select safe values within that space
+    x restarting the task and detecting failures is how people do it in the literature. dont rathole on this
+
+x need to reset after get in to a bad state
+
+- P(a) too small !! need to use log prob
+
+- logprob starts to explode...seems fine when > -1e6 or so, but
+    - score peaks after a while at ~- 1e7
+    - then grows after that...which makes little sense variance didnt decrease....so...wtf???
+
+- achieved decent perf (100-200) briefly then went nuts...u diverged massively, logprob became massively negative.
+    - what happened to gradients?
+
+
+
+### retry with lower learning rate 1e-4
+
+7e-4 may be too high according to a3c paper
+
+
+### with 32h 32lstm x 3 nets
+
+Tmax = 100
+
+- may work better with Tmax smaller Tmax
+- may work better with shorter timestep-limit
+- may work better with larger networks...lots of joints to control for only 32 encoder neurons
+
+
+
+
+
+# Possible experimental general improvements
+
+- readd initial random action to help with exploration
+
+- potentially boost initial weight magnitudes again since that wasnt the root of the problem
+
+
+
+# lingering questions
+
+
+- fixed entropy term...sort of?
+    - was prevented from being negative before, now is initially...and could easily remain so depending on the variance...think this needs more thought
+
+
+- check policy pdf computed properly...check by hand
+
+
+x check if train.minimize is minimizing abs val or magnitude
+    !!!!!! or if policy loss should be able to be positive for that matter??? !!!!!!!
+
+- see if adding back in input history kills perf
+
+- is lstm hidden state carrying useful information?
+
+    - try comparing FF and LSTM versions...
+        - difficult to compare directly
+
+    - try setting hidden state to constant after each step and see if learning suffers
+        - need to look at lstm paper to pick a good constant. 0 or 1 may not be right
 

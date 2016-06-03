@@ -234,12 +234,12 @@ class LowDimACNetwork(object):
             if self._continuous_mode:
                 # continuous output config
 
-                hidden_mu_output, hidden_mu_output_size = hidden_layers(input_state_flat, input_size, name="mu_net")
-                W_mu, b_mu, mu = self._fc_layer(hidden_mu_output, hidden_mu_output_size, self._action_size, activation=tf.identity, name="mu")
+                hidden_policy_output, hidden_policy_output_size = hidden_layers(input_state_flat, input_size, name="mu_net")
+                W_mu, b_mu, mu = self._fc_layer(hidden_policy_output, hidden_policy_output_size, self._action_size, activation=tf.identity, name="mu")
                 layers.append((W_mu, b_mu, mu, "mu"))
 
-                hidden_sigma2_output, hidden_sigma2_output_size = hidden_layers(input_state_flat, input_size, name="sigma2_net")
-                W_sigma2, b_sigma2, sigma2 = self._fc_layer(hidden_sigma2_output, hidden_sigma2_output_size, 1, activation=tf.nn.softplus, name="sigma2")
+                # hidden_sigma2_output, hidden_sigma2_output_size = hidden_layers(input_state_flat, input_size, name="sigma2_net")
+                W_sigma2, b_sigma2, sigma2 = self._fc_layer(hidden_policy_output, hidden_policy_output_size, 1, activation=tf.nn.softplus, name="sigma2")
                 layers.append((W_sigma2, b_sigma2, sigma2, "sigma2"))
 
                 self.mu = mu
@@ -336,12 +336,12 @@ class LowDimACNetwork(object):
     def _multivariate_normal_log_pdf(self, x, mean, var):
 
         ## TODO: validate & test
-        n = tf.size(mean)
-        var_to_the_n = tf.pow(var, tf.cast(n, tf.float32))
+        n = tf.cast(tf.size(mean), tf.float32)
+        var_to_the_n = tf.pow(var, n)
 
         return \
-            -0.5*n*safe_log(var,arg_min=1e-6, arg_max=float("inf")) + \
-            + (-0.5 * (1/var_to_the_n)) * tf.reduce_sum(tf.squared_difference(x, mean), reduction_indices=(1,))
+            -0.5*n*safe_log(var,arg_min=1e-6, arg_max=float("inf")) \
+            + (-0.5 * (1/tf.maximum(var_to_the_n, 1e-6)) * tf.reduce_sum(tf.squared_difference(x, mean), reduction_indices=(1,)))
 
 
 
@@ -357,20 +357,35 @@ class LowDimACNetwork(object):
         # policy entropy
         entropy = -0.5*(tf.log(tf.maximum(1e-10, (2*math.pi*self.sigma2)))+1) #  dont clip maximum value of argument
 
-        # TODO: make sure entropy_beta ends up around 1e-4 as per the paper
 
         # policy probablity pi(a | s_t, theta)
         sampled_action_probability = self._multivariate_normal_pdf(self.a, self.mu, self.sigma2)
+        sampled_action_log_probability = self._multivariate_normal_log_pdf(self.a, self.mu, self.sigma2)
 
-        summaries += [tf.scalar_summary(["P(a)"], tf.reshape(sampled_action_probability, (1,)))]
+        summaries += [tf.scalar_summary(["log P(a) log of pdf"],
+                                        tf.reshape(safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
+        summaries += [tf.scalar_summary(["log P(a) log prob"],
+                                        tf.reshape(sampled_action_log_probability, (1,)))]
+        summaries += [tf.scalar_summary(["log P(a) (log prob - lof of pdf)"],
+                                        tf.reshape(sampled_action_log_probability - safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
+
+
+        summaries += [tf.scalar_summary(["sigma2"], tf.reshape(self.sigma2, (1,)))]
+
+        summaries += [tf.histogram_summary("mu", self.mu )]
+
+
 
         # NB: revisit what correct shape should be for this
         # TODO: HACK: reduce_sum here even though
 
-        policy_loss = safe_log(sampled_action_probability) * (self.td + entropy * entropy_beta)
+        # policy_loss = safe_log(sampled_action_probability) * (self.td + entropy * entropy_beta)
+        policy_loss = sampled_action_log_probability * (self.td + entropy * entropy_beta)
 
+        #  TODO: cleanup non-log policy
 
-        policy_loss = -policy_loss    # maybe this will be slightly better if we have the wrong gradients being computed
+        policy_loss = -policy_loss    # maybe this will be slightly better if we dont have the wrong gradients being computed!!!
+
         # print "-----------------------------------------"
         # print "entropy              ", entropy
         # print "sampled action prob  ", sampled_action_probability
