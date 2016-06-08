@@ -83,6 +83,18 @@ the case of walker2d).
 - validate on multiple tasks, ensure robust implementation
 
     - half-cheetah should actually train much faster and better...try with larger network
+    x try readding state history
+    - look at LSTM training again...may be holding us back
+        - more complex lstm model
+      			- finish extending with peepholes, etc
+        - try doing lstm in a `tf.while_loop` for easier graph setup for BPTT?
+        - look up TF BPTT impls
+        - do TF BPTT the hard way if necessary
+
+        - or elim in favor of deeper fc network
+    - try adding another fc layer
+    - figure out if lstm hidden state training is working at all
+
 
 - validate that i can bootstrap with experience replay and elite samples
     (necessary precondition for unity being a viable simulation environment)
@@ -171,6 +183,14 @@ converged to local minima and stayed there for 30+minutes. gradients mostly zero
 
 - try with larger network?
 
+
+### with 200hx128lstm
+
+and fixed lstm state bug
+
+at least doesnt diverge quickly, but learning still seems to get stuck.
+
+CHECK: perhaps adding state history to input will let it learn velocities more easily? lstm should be able to learn them in principle but in practice...hard to say
 
 ## HalfCheetah-v1
 

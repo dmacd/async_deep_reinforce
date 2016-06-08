@@ -141,6 +141,9 @@ class A3CTrainingThread(object):
         # t_max times loop
         for i in range(LOCAL_T_MAX):
 
+            states.append(self.game_state.s_t)
+            lstm_states.append(lstm_state)
+
             pi_, value_, lstm_state = self.local_network.run(sess, self.game_state.s_t,
                                                              lstm_state)
 
@@ -151,11 +154,9 @@ class A3CTrainingThread(object):
             # pi_ = self.local_network.run_policy(sess, self.game_state.s_t)
             # action = choose_action(pi_)  # self.choose_action(pi_)
 
-            states.append(self.game_state.s_t)
             actions.append(action)
             # value_ = self.local_network.run_value(sess, self.game_state.s_t)
             values.append(value_)
-            lstm_states.append(lstm_state)
 
             if (self.thread_index == 0) and (self.local_t % 100) == 0:
                 print "pi=", pi_
@@ -204,15 +205,53 @@ class A3CTrainingThread(object):
         # self.local_network.lstm_last_output_state_value = lstm_state # preserve for next time through the loop
         self.lstm_last_output_state = lstm_state
 
+        #  TODO: cant store the lists i pass directly since they'll be destructively reversed by
+        # this call....hmmmmm
+        # maybe just reverse them here and leave it?
+        #  start with copying the lists
+        self.backup_and_accum_gradients(sess, global_t, summary_writer,
+                                        states=states,
+                                        lstm_states=lstm_states,
+                                        actions=actions,
+                                        values=values,
+                                        rewards=rewards,
+                                        final_reward_estimate=R)
+
+
+        if (self.thread_index == 0) and (self.local_t % 100) == 0:
+            print("TIMESTEP %d GLOBAL %d" % (self.local_t, global_t))
+
+        # 進んだlocal step数を返す
+        diff_local_t = self.local_t - start_local_t
+        return diff_local_t
+
+    def backup_and_accum_gradients(self, sess, global_t, summary_writer,
+                                   states, lstm_states, actions, values, rewards,
+                                   final_reward_estimate):
+        """ inputs are lists reflecting a recorded episode fragment in the order they occured
+
+            a = sample{ pi(a | s, lstm_s ) }
+            v = V(s, lstms)
+            r = env.step(a)
+
+        :param states: states
+        :param actions:
+        :param rewards:
+        :param lstm_states:
+        :return:
+        """
+
+
+        # TODO: copy these and leave the originals alone...
         actions.reverse()
         states.reverse()
         rewards.reverse()
         values.reverse()
         lstm_states.reverse()
 
+        R = final_reward_estimate
+
         # compute and accmulate gradients
-
-
         for (ai, ri, si, Vi, lstm_si) in zip(actions, rewards, states, values, lstm_states):
             R = ri + GAMMA * R
             td = R - Vi
@@ -235,6 +274,17 @@ class A3CTrainingThread(object):
             if (self.thread_index == 0):
                 summary_writer.add_summary(loss_summary, global_step=global_t)
 
+
+        """ idea: maybe possible to do n-step TBPTT after having retroactively computed R for each state
+        feed in batches of size up to n_max to a set of parallel networks with 
+        
+        
+        idea: set up the lstm with say 5 recursive calls. then the initial inputs would need to be padded...maybe?
+        would work if made the inputs in batches and altered iteration logic to cycle inputs through the history...
+        
+
+        """
+
         cur_learning_rate = self._anneal_learning_rate(global_t)
 
         _, grad_summary = sess.run([self.apply_gradients, self.grad_summary_op],
@@ -243,11 +293,118 @@ class A3CTrainingThread(object):
         if (self.thread_index == 0):
             summary_writer.add_summary(grad_summary, global_step=global_t)
 
-        if (self.thread_index == 0) and (self.local_t % 100) == 0:
-            print("TIMESTEP %d GLOBAL %d" % (self.local_t, global_t))
 
-        # 進んだlocal step数を返す
-        diff_local_t = self.local_t - start_local_t
-        return diff_local_t
+    #  TODO: rename 'states' variable as 'observations' in next version just to be fucking crystal clear
 
 
+    def process_memory(self, sess, global_t, summary_writer,
+                       states, initial_lstm_state, actions, rewards, final_state):
+        """
+        :param sess:
+        :param global_t:
+        :param summary_writer:
+        :param states:
+        :param initial_lstm_state:
+        :param actions:
+        :param rewards:
+        :param final_state:         observation after the last game step...use None to signal terminal, otherwise used
+         to compute the final boostrap Value
+        :return:
+        """
+
+        # TODO: gotcha initial_lstm_state must be set carefully
+        # if the episode reflects t=0, the state is always known
+        # otherwise how can we know what the lstm state output of the *current* policy might plausibly have been
+        # unless the same policy was executed from the very beginning of the historical episode and propagated
+        # we could just record the lstm_state prior to the beginning of the history episode as an approximation
+        # we might expect it to converge reasonably after a number of steps to something from the plausible distribution
+        # for the current policy...however, over time, the policy will drift away further and further from what
+        # created the original lstm_state
+        # this suggests the solution that we update the stored initial lstm state in the replay memory after every refresh
+        # ...almost like a real memory trace in a human brain might...
+        # but how can we update it ????
+        # maybe keep one state in reserve just to prime...but then we can only update the lstm state after it, not the one
+        # that initial state needs....HMMM. maybe just
+        #
+        # for certain environments we could just apply the network to s_t+0 repeatedly until the lstm state converges
+        # this works if the problem and/or env dont depend on any direct measure of time..perhaps
+        #
+        # easiest solution might just be to always reference the episodes to t=0
+        # or just ignore first k states when backing up and computing gradients...since presumably we'll have converged
+        # to something reasonable by that point
+
+
+
+        values = []
+        lstm_states = []
+
+        terminal_end = False
+
+        # reset accumulated gradients
+        sess.run(self.reset_gradients)
+
+        # copy weights from shared to local
+        sess.run(self.sync)
+        lstm_state = initial_lstm_state
+
+        for (s_t, a_t, r_t) in zip(states, actions, rewards):
+
+            # accum lstm states
+            lstm_states.append(lstm_state)
+
+            pi_, value_, lstm_state = self.local_network.run(sess, s_t, lstm_state)
+
+            # get values
+            values.append(values)
+
+
+
+        # what to do if terminal?
+        # set R = 0
+        # if not, recompute final_reward_estimate using value net and final
+
+
+# overkill for now but may be useful to tag with other info later
+class ReplayEpisode(object):
+
+    def __init__(self,
+                 observations,
+                 initial_lstm_state,
+                 actions,
+                 rewards,
+                 final_state
+                 ):
+        self.observations = observations
+        self.initial_lstm_state = initial_lstm_state
+        self.action = actions
+        self.rewards = rewards
+        self.final_state = final_state
+
+        self._total_reward = np.sum(rewards)
+
+    @property
+    def total_reward(self):
+        return self._total_reward
+
+import sortedcontainers
+
+class ReplayMemory(object):
+
+    def __init__(self, max_episodes):
+
+        self._max_episodes = max_episodes
+        # need a sorted map...by reward
+
+        self.episodes = sortedcontainers.SortedListWithKey(key=lambda x: x.total_reward)
+
+
+
+
+    def submit_episode(self, episode):
+
+        # check ep total reward and insert it in the map, discarding out of the middle on overflow
+
+
+        if len(self.episodes) > self._max_episodes:
+            # remove from random position in the middle 25% of the list
+            self.episodes.remove

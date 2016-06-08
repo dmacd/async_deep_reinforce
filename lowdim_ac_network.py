@@ -10,6 +10,27 @@ import random
 
 import uuid
 
+
+def _is_iterable(x):
+    return hasattr(x, "__iter__") \
+           and not isinstance(x, basestring) \
+           and not isinstance(x, tf.Variable)
+
+def flatten(x):
+    """ flattens a nested structure.
+        mind-bogglingly omitted from python.
+        what a joke
+    """
+    result = []
+
+    for el in x:
+        # if hasattr(el, "__iter__") and not isinstance(el, basestring):
+        if _is_iterable(el):
+            result.extend(flatten(el))
+        else:
+            result.append(el)
+    return result
+
 # global unique_string_counter
 # unique_string_counter = 0
 def unique_string():
@@ -26,6 +47,20 @@ def safe_log(x, arg_min=1e-10, arg_max=1):
 
 
 
+def get_basic_lstm_vars_from_scope(scope):
+    # print scope
+    # print scope.name
+    # vars = tf.get_collection(tf.GraphKeys.VARIABLES)
+    # print "all graph vars:", map(lambda x: x.name, vars)
+
+    lstm_variables = tf.get_collection(tf.GraphKeys.VARIABLES, scope=scope.name)
+
+    print "lstm_variables:"
+    print map(lambda x: x.name, lstm_variables)
+    Ws = filter(lambda x: "Matrix" in x.name, lstm_variables)
+    Bs = filter(lambda x: "Bias" in x.name, lstm_variables)
+    return Ws, Bs
+
 def get_lstm_vars_from_scope(scope):
     # print scope
     # print scope.name
@@ -33,11 +68,14 @@ def get_lstm_vars_from_scope(scope):
     # print "all graph vars:", map(lambda x: x.name, vars)
 
     lstm_variables = tf.get_collection(tf.GraphKeys.VARIABLES, scope=scope.name)
-    # print lstm_variables
+
+    # print "lstm_variables:"
     # print map(lambda x: x.name, lstm_variables)
-    Ws = filter(lambda x: "Matrix" in x.name, lstm_variables)
-    Bs = filter(lambda x: "Bias" in x.name, lstm_variables)
+    Ws = filter(lambda x: "LSTMCell/W" in x.name, lstm_variables)
+    Bs = filter(lambda x: "LSTMCell/B" in x.name, lstm_variables)
     return Ws, Bs
+
+
 
 # Actor-Critic Network (Policy network and Value network)
 
@@ -172,7 +210,7 @@ class LowDimACNetwork(object):
         batch_size = 1
         with tf.device(self._device), tf.name_scope(self.network_name):
 
-            input_history = 1
+            input_history = 4
 
             # input
             self.s = tf.placeholder("float", [1, self._input_size, input_history]) #[1, 84, 84, 4])
@@ -202,12 +240,18 @@ class LowDimACNetwork(object):
                     layer_name = self.network_name + "/" + name + "/lstm0"
                     with tf.variable_scope(layer_name) as vs:
                         # just 1 for now
-                        lstm = tf.nn.rnn_cell.BasicLSTMCell(self._lstm_sizes[0])
+                        # lstm = tf.nn.rnn_cell.BasicLSTMCell(self._lstm_sizes[0])
+                        lstm = tf.nn.rnn_cell.LSTMCell(self._lstm_sizes[0], use_peepholes=True) # try fancier lstm .... grr returns more weight matrices fuck
                         # todo: append stats somehow
 
                         current_state_tensor = tf.placeholder("float", [batch_size, lstm.state_size])
                         self.lstm_current_state_tensors.append(current_state_tensor)
                                                                 #tf.zeros([batch_size, lstm.state_size])
+
+                        # todo: use # of steps in second index on input
+                        #  reshape the input tensor to fit better in the computations
+                        #             tf.get_variable_scope().reuse_variables()
+
 
                         y, output_state_tensor = lstm(x, current_state_tensor)
                         self.lstm_output_state_tensors.append(output_state_tensor)
@@ -216,16 +260,26 @@ class LowDimACNetwork(object):
                         self._lstm_initial_state_value.append(np.zeros(dtype="float32",shape=[batch_size, lstm.state_size ]))
 
                         # retrieve variables
-                        Ws, Bs = get_lstm_vars_from_scope(vs)
+                        Ws, bs = get_lstm_vars_from_scope(vs)
                         #  we arent equipped to deal with more complex setups yet
                         # print "lstm Ws:", Ws
-                        assert len(Ws) == 1
-                        assert len(Bs) == 1
+                        # assert len(Ws) == 1
+                        # assert len(bs) == 1
                         # manually add variable summaries
-                        self.variable_summaries(Ws[0], "W_%s" % layer_name)
-                        self.variable_summaries(Bs[0], "b_%s" % layer_name)
+                        print "Ws:", Ws
+                        print "bs:", bs
 
-                        layers.append((Ws[0],Bs[0],y,layer_name))
+                        for W in Ws:
+                            print "Adding summaries for layer %s : %s=%s" % (layer_name, W.name, W)
+                            self.variable_summaries(W, "W_%s_%s" % (layer_name, W.name))
+
+                        for b in bs:
+                            print "Adding summaries for layer %s : %s=%s" % (layer_name, b.name, b)
+                            self.variable_summaries(b, "b_%s_%s" % (layer_name, b.name))
+
+
+                        layers.append((Ws,bs,y,layer_name))     # can now add tuples of weights or biases to this list
+
                         x = y
                         input_size = self._lstm_sizes[0]
 
@@ -240,6 +294,7 @@ class LowDimACNetwork(object):
 
                 # hidden_sigma2_output, hidden_sigma2_output_size = hidden_layers(input_state_flat, input_size, name="sigma2_net")
                 W_sigma2, b_sigma2, sigma2 = self._fc_layer(hidden_policy_output, hidden_policy_output_size, 1, activation=tf.nn.softplus, name="sigma2")
+                sigma2 = tf.maximum(sigma2, 1e-3)  # MINOR HACK: bound variance so that our log probs dont get fucked
                 layers.append((W_sigma2, b_sigma2, sigma2, "sigma2"))
 
                 self.mu = mu
@@ -308,6 +363,8 @@ class LowDimACNetwork(object):
             l.extend(summaries)
             l += [tf.scalar_summary(["R"], self.r)]
             l += [tf.scalar_summary(["(R-V)"], self.td)]
+            l += [tf.scalar_summary(["V (loss eval)"], tf.reshape(self.v, (1,)))]
+            l += [tf.scalar_summary(["V (r-td)"], self.r - self.td)]
             l += [tf.scalar_summary(["entropy"], tf.reshape(entropy, (1,)))]
             l += [tf.scalar_summary(["policy_loss"], tf.reshape(policy_loss, (1,)))]    # TODO: HACK: when we do batch mode, will want a histogram and ditch the reshape, most likely?
             l += [tf.scalar_summary("value_loss", value_loss)]
@@ -341,8 +398,23 @@ class LowDimACNetwork(object):
 
         return \
             -0.5*n*safe_log(var,arg_min=1e-6, arg_max=float("inf")) \
-            + (-0.5 * (1/tf.maximum(var_to_the_n, 1e-6)) * tf.reduce_sum(tf.squared_difference(x, mean), reduction_indices=(1,)))
+            + (-0.5 * (1/tf.maximum(var_to_the_n, 1e-24)) * tf.reduce_sum(tf.squared_difference(x, mean), reduction_indices=(1,)))
 
+
+    def _tf_inspired_mvn_log_pdf(self, x, mean, var):
+
+        k = tf.cast(tf.size(mean), tf.float32)
+
+        log_two_pi = tf.constant(math.log(2 * math.pi), dtype=tf.float32)
+        x_whitened = (x - mean) / tf.sqrt(var)
+        x_whitened_norm = tf.reduce_sum(x_whitened * x_whitened)
+
+        sigma_det = tf.pow(var, k)
+
+        log_pdf_value = (
+          -tf.log(sigma_det) - k * log_two_pi - x_whitened_norm) / 2
+
+        return log_pdf_value
 
 
     def _prepare_policy_loss_continuous(self, entropy_beta):
@@ -359,20 +431,48 @@ class LowDimACNetwork(object):
 
 
         # policy probablity pi(a | s_t, theta)
-        sampled_action_probability = self._multivariate_normal_pdf(self.a, self.mu, self.sigma2)
-        sampled_action_log_probability = self._multivariate_normal_log_pdf(self.a, self.mu, self.sigma2)
 
-        summaries += [tf.scalar_summary(["log P(a) log of pdf"],
-                                        tf.reshape(safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
-        summaries += [tf.scalar_summary(["log P(a) log prob"],
+        cov = self.sigma2 * tf.constant(np.identity(self._action_size), dtype=tf.float32)
+        cov = tf.reshape(cov, shape=(1,self._action_size, self._action_size)) # mvn needs batch index to stay
+        print "Sigma2 shape,", self.sigma2.get_shape()
+        print "cov shape,", cov.get_shape()
+        print "mu shape,", self.mu.get_shape()
+        mvn = tf.contrib.distributions.MultivariateNormal(self.mu, sigma_chol=tf.sqrt(cov))
+
+        sampled_action_probability = self._multivariate_normal_pdf(self.a, self.mu, self.sigma2)
+        # sampled_action_log_probability_homebrew = self._multivariate_normal_log_pdf(self.a, self.mu, self.sigma2)
+        sampled_action_log_probability_homebrew = self._tf_inspired_mvn_log_pdf(self.a, self.mu, self.sigma2)
+        sampled_action_log_probability = tf.maximum(mvn.log_pdf(self.a), -1e+10)
+
+        # summaries += [tf.scalar_summary(["log P(a) log of pdf"],
+        #                                 tf.reshape(safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
+        summaries += [tf.scalar_summary(["log P(a) tf"],
                                         tf.reshape(sampled_action_log_probability, (1,)))]
-        summaries += [tf.scalar_summary(["log P(a) (log prob - lof of pdf)"],
-                                        tf.reshape(sampled_action_log_probability - safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
+        summaries += [tf.scalar_summary(["log P(a) homebrew"],
+                                        tf.reshape(sampled_action_log_probability_homebrew, (1,)))]
+        # summaries += [tf.scalar_summary(["log P(a) (log prob - lof of pdf)"],
+        #                                 tf.reshape(sampled_action_log_probability - safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
+
+        # summaries += [tf.scalar_summary(["log P(a) (log prob - lof of pdf)"],
+        #                                 tf.reshape(sampled_action_log_probability - safe_log(sampled_action_probability, arg_min=1e-30), (1,)))]
+
+        summaries += [tf.scalar_summary(["logprob_homebrew(a) - logprob_tf(a)"],
+                                        tf.reshape(sampled_action_log_probability_homebrew - sampled_action_log_probability, (1,)))]
+
+
+
 
 
         summaries += [tf.scalar_summary(["sigma2"], tf.reshape(self.sigma2, (1,)))]
 
         summaries += [tf.histogram_summary("mu", self.mu )]
+
+        """ NEXT STEP:
+        - determined that tf's mvn logprob gives right answers whereas mine doesnt for dimns > 1, but agrees with dim == 1
+        - deterimend that tf's mvn logprob FUCKS the gradient, whereas mine doesnt
+        - find the error in my logprob
+        - may be purely numerical...could help to whiten x before reducing
+         """
 
 
 
@@ -380,7 +480,7 @@ class LowDimACNetwork(object):
         # TODO: HACK: reduce_sum here even though
 
         # policy_loss = safe_log(sampled_action_probability) * (self.td + entropy * entropy_beta)
-        policy_loss = sampled_action_log_probability * (self.td + entropy * entropy_beta)
+        policy_loss = sampled_action_log_probability_homebrew * (self.td + entropy * entropy_beta)
 
         #  TODO: cleanup non-log policy
 
@@ -524,8 +624,9 @@ class LowDimACNetwork(object):
 
         vars = []
         for (W,b,y,name) in self._layers:
-            vars.append(W)
-            vars.append(b)
+            # vars.append(W)
+            vars.extend(flatten([W]))
+            vars.extend(flatten([b]))
 
         return vars
         # return [
@@ -562,15 +663,15 @@ class LowDimACNetwork(object):
 
     def _fc_weight_variable(self, shape, name="anon_weight"):
         input_channels = shape[0]
-        # d = 1.0 / np.sqrt(input_channels)
-        d = 1.0 / input_channels**2
+        d = 1.0 / np.sqrt(input_channels)
+        # d = 1.0 / input_channels**2
         initial = tf.random_uniform(shape, minval=-d, maxval=d)
         return tf.Variable(initial, name=name)
 
 
     def _fc_bias_variable(self, shape, input_channels, name="anon_bias"):
-        # d = 1.0 / np.sqrt(input_channels)
-        d = 1.0 / input_channels**2
+        d = 1.0 / np.sqrt(input_channels)
+        # d = 1.0 / input_channels**2
         initial = tf.random_uniform(shape, minval=-d, maxval=d)
         return tf.Variable(initial, name=name)
 
@@ -606,7 +707,11 @@ class LowDimACNetwork(object):
         # self._save_sub(sess, prefix, self.W_conv2, "W_conv2")
         # self._save_sub(sess, prefix, self.b_conv2, "b_conv2")
 
+
+
         for (W,b,y,name) in self._layers:
+            # TODO: not implemented yet for multi-weight layers
+            assert(len(W) == 1)
             self._save_sub(sess, prefix, W, W.name)
             self._save_sub(sess, prefix, b, b.name)
 

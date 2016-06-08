@@ -53,8 +53,8 @@ class GymGameState(object):
 
         self.reward = 0
         self.terminal = False
-        # self.s_t = np.stack((x_t, x_t, x_t, x_t), axis=1)
-        self.s_t = np.stack((x_t,), axis=1)
+        self.s_t = np.stack((x_t, x_t, x_t, x_t), axis=1)
+        # self.s_t = np.stack((x_t,), axis=1)
 
     def constrain_action(self, action):
         if isinstance(self.env.action_space, spaces.Box):

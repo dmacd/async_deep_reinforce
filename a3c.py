@@ -64,7 +64,35 @@ parser = argparse.ArgumentParser(description='Run a3c.')
 parser.add_argument('--render', dest='visualize_global', action='store_true',
                     help='render the global network applied to a test environment')
 
+parser.add_argument('--tag', dest='tag', action='store',
+                    default="",
+                    help='tag to label the summary data')
+
+parser.add_argument('--hidden', dest='hidden_sizes', action='append',
+                    default=[200],
+                    help='number of units in 1st fc hidden layer')
+
+parser.add_argument('--lstm', dest='lstm_sizes', action='append',
+                    default=[128],
+                    help='number of units in lstm layer')
+
+parser.add_argument('--lr', dest='initial_learning_rate', action='store',
+                    default=initial_learning_rate, type=float,
+                    help='initial learning rate')
+
+parser.add_argument('--max_time_step', dest='max_time_step', action='store',
+                    default=constants.MAX_TIME_STEP, type=int,
+                    help='max time step to run for')
+
+parser.add_argument('--gym_env', dest='gym_env', action='store',
+                    default=constants.GYM_ENV,
+                    help='gym environment to use')
+
+
 args = parser.parse_args()
+print "*********************************************************"
+print "Run configuration:", args
+print "*********************************************************"
 
 visualize_global = args.visualize_global
 
@@ -72,7 +100,7 @@ visualize_global = args.visualize_global
 ## network setup
 # global_network = GameACNetwork(ACTION_SIZE, device)
 
-env = gym.make(constants.GYM_ENV)
+env = gym.make(args.gym_env)
 
 print("Env observation space:", env.observation_space)
 
@@ -88,8 +116,8 @@ else:
 global_network = LowDimACNetwork(continuous_mode=constants.CONTINUOUS_MODE,
                                  action_size=action_size,
                                  input_size=input_size,
-                                 hidden_sizes=[64],
-                                 lstm_sizes=[64],
+                                 hidden_sizes=args.hidden_sizes, #[200],
+                                 lstm_sizes=args.lstm_sizes, #[128],
                                  network_name="global-net",
                                  device=device)
 
@@ -107,11 +135,11 @@ grad_applier = RMSPropApplier(learning_rate = learning_rate_input,
                               device = device)
 
 for i in range(PARALLEL_SIZE):
-  training_thread = A3CTrainingThread(i, global_network, initial_learning_rate,
+  training_thread = A3CTrainingThread(i, global_network, args.initial_learning_rate,
                                       learning_rate_input,
-                                      grad_applier, MAX_TIME_STEP,
+                                      grad_applier, args.max_time_step,
                                       device = device,
-                                      environment=gym.make(constants.GYM_ENV))
+                                      environment=gym.make(args.gym_env))
   training_threads.append(training_thread)
 
 
@@ -127,7 +155,16 @@ def setup_summaries(sess):
     ROOT_LOG_DIR = constants.LOG_FILE #os.getcwd() + "/tf-log/"
     TODAY_LOG_DIR = ROOT_LOG_DIR + "/" + datetime.now().date().isoformat()
 
-    LOG_DIR = TODAY_LOG_DIR + "/" + datetime.now().isoformat('_').replace(':', '.')
+    LOG_DIR = TODAY_LOG_DIR + "/" + datetime.now().time().replace(second=0, microsecond=0).isoformat()[0:-3].replace(':', '.')
+
+    LOG_DIR += " %s" % args.gym_env
+    LOG_DIR += " lr=%f" % args.initial_learning_rate
+    LOG_DIR += " hs=%s" % args.hidden_sizes
+    LOG_DIR += " lstms=%s " % args.lstm_sizes
+
+    if len(args.tag) > 0:
+        LOG_DIR += " -- %s" % args.tag
+
 
     score_input = tf.placeholder(tf.float32,name="score_input")
     score_input_avg = tf.placeholder(tf.float32,name="score_input_avg")
@@ -196,7 +233,17 @@ for v in vars:
 ###############################################################################
 # init or load checkpoint with saver
 saver = tf.train.Saver() # TODO: just save/restore global net params
-checkpoint = tf.train.get_checkpoint_state(CHECKPOINT_DIR)
+
+checkpoint_name = "checkpoint"
+checkpoint_name += " %s" % args.gym_env
+checkpoint_name += " hs=%s" % args.hidden_sizes
+checkpoint_name += " lstms=%s " % args.lstm_sizes
+
+if len(args.tag) > 0:
+    checkpoint_name += " -- %s" % args.tag
+
+
+checkpoint = tf.train.get_checkpoint_state(CHECKPOINT_DIR) 
 if checkpoint and checkpoint.model_checkpoint_path:
   saver.restore(sess, checkpoint.model_checkpoint_path)
   print "checkpoint loaded:", checkpoint.model_checkpoint_path
@@ -208,25 +255,44 @@ else:
   print "Could not find old checkpoint"
 
 
+def save_checkpoint(name='checkpoint'):
+
+    if not os.path.exists(CHECKPOINT_DIR):
+      os.mkdir(CHECKPOINT_DIR)
+
+    saver.save(sess, CHECKPOINT_DIR + '/' + name, global_step=global_t)
+
+def should_save_checkpoint(global_t, checkpoint_every, checkpoint_count):
+    return (math.floor(global_t/checkpoint_every) > checkpoint_count)
+
+###################################################################
+
 def train_function(parallel_index):
-  global global_t
-  global stop_requested
-  
-  training_thread = training_threads[parallel_index]
+    global global_t
+    global stop_requested
 
-  while True:
-    if stop_requested:
-      break
-    if global_t > MAX_TIME_STEP:
-      break
+    training_thread = training_threads[parallel_index]
 
-    diff_global_t = training_thread.process(sess, global_t, summary_writer,
-                                            record_score_fn)
-                                            #score_summary_op, score_input)
-    global_t += diff_global_t
+    checkpoint_count = 0
+
+    while True:
+        if stop_requested:
+            break
+        if global_t > args.max_time_step:
+            break
+
+        diff_global_t = training_thread.process(sess, global_t, summary_writer,
+                                                record_score_fn)
+        # score_summary_op, score_input)
+        global_t += diff_global_t
 
 
-    
+        # global checkpoint saving
+        if parallel_index == 0 and should_save_checkpoint(global_t, 1000000, checkpoint_count):
+            checkpoint_count += 1
+            print "Saving checkpoint %d at t=%d" % (checkpoint_count, global_t)
+            save_checkpoint(name=checkpoint_name)
+
     
 def signal_handler(signal, frame):
   global stop_requested
@@ -248,13 +314,13 @@ def vis_network_thread(network):
 
     global stop_requested
     global global_t
-    #from a3c_training_thread import choose_action
-    env = gym.make(constants.GYM_ENV)
 
+    # init env & states
+    env = gym.make(args.gym_env)
     game_state = gym_game_state.GymGameState(0, display=True, no_op_max=0, env=env)  # resets env already
-    #env.render()
-    print "vis thread started"
     lstm_state = network.lstm_initial_state_value
+
+    print "vis thread started"
 
     episode_reward = 0
     while True:
@@ -263,7 +329,7 @@ def vis_network_thread(network):
         #print "vis thread step"
         if stop_requested:
             break
-        if global_t > MAX_TIME_STEP:
+        if global_t > args.max_time_step:
             break
 
         # print "lstm state:", lstm_state
@@ -286,12 +352,20 @@ def vis_network_thread(network):
         episode_reward += game_state.reward
         if game_state.terminal:
 
-            # todo: avg episode rewards and display those
+
             print "EPISODE REWARD: ", episode_reward
             episode_reward = 0
+
+            #  TODO: try trapping exceptions on this thread...see if can avoid bad state that way
+
+
+            # env.render(close=True) # does close window but doesnt help reset after exceptions...
+            # env.close() # TODO: validate that this is stable/efficient
+
+            # reinit env & states
+            # env = gym.make(args.gym_env)
             game_state = gym_game_state.GymGameState(0, display=True, no_op_max=0, env=env)
             lstm_state = network.lstm_initial_state_value
-
 
 
 
@@ -333,8 +407,16 @@ signal.signal(signal.SIGINT, signal_handler)
 print('Press Ctrl+C to stop')
 
 
-# run vis on main thread always...yes, much better
-vis_network_thread(global_network)
+try:
+    # run vis on main thread always...yes, much better
+    vis_network_thread(global_network)
+except Exception as e:
+    print "exception in vis thread, exiting"
+    stop_requested = True
+    print e
+
+
+
 
 # signal.pause() # vis thread effectively pauses!
 
@@ -355,10 +437,5 @@ print("*************************************************************************
 print('Now saving data. Please wait')
 
 
-if not os.path.exists(CHECKPOINT_DIR):
-  os.mkdir(CHECKPOINT_DIR)  
 
-saver.save(sess, CHECKPOINT_DIR + '/' + 'checkpoint', global_step = global_t)
-
-
-
+save_checkpoint(checkpoint_name)

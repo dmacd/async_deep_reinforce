@@ -12,12 +12,12 @@ PARALLEL_SIZE = 16                  # parallel thread size
 ROM = "pong.bin"                    # action size = 3
 ACTION_SIZE = 3                     # action size
 
-# INITIAL_ALPHA_LOG_RATE = 0.4226     # log_uniform interpolate rate for learning rate (around 7 * 10^-4)
-INITIAL_ALPHA_LOG_RATE = 0          # set lower for HalfCheetah
+INITIAL_ALPHA_LOG_RATE = 0.4226     # log_uniform interpolate rate for learning rate (around 7 * 10^-4)
+# INITIAL_ALPHA_LOG_RATE = 0          # set lower for HalfCheetah
 GAMMA = 0.99                        # discount factor for rewards
 # ENTROPY_BETA = 0.05               # entropy regurarlization constant
 ENTROPY_BETA = 1e-4                 # entropy regurarlization constant
-MAX_TIME_STEP = 6 * 10**7
+MAX_TIME_STEP = 4 * 10**6
 GRAD_NORM_CLIP = 10.0               # gradient norm clipping
 USE_GPU = False                     # To use GPU, set True
 
@@ -29,8 +29,8 @@ CONTINUOUS_MODE = True
 if CONTINUOUS_MODE:
     # continuous envs
     # GYM_ENV="InvertedPendulum-v1"
-    GYM_ENV="HalfCheetah-v1"
-    # GYM_ENV="Reacher-v1"
+    # GYM_ENV="HalfCheetah-v1"
+    GYM_ENV="Reacher-v1"
 
 else:
     GYM_ENV="CartPole-v0"
