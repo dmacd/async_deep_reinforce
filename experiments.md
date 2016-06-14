@@ -86,11 +86,19 @@ the case of walker2d).
     x try readding state history
     - look at LSTM training again...may be holding us back
         - more complex lstm model
-      			- finish extending with peepholes, etc
+      			x finish extending with peepholes, etc
+                - seems to only make things slower
         - try doing lstm in a `tf.while_loop` for easier graph setup for BPTT?
         - look up TF BPTT impls
-        - do TF BPTT the hard way if necessary
+            - references
+                  https://www.reddit.com/r/MachineLearning/comments/3sok8k/tensorflow_basic_rnn_example_with_variable_length/
+                  http://stackoverflow.com/questions/36479335/dynamic-lstm-in-tensorflow-optimizer-issues
 
+        - do TF BPTT the hard way if necessary
+            - TODOS:
+                x need to reshape input `s_t` to [batch,hist, input-size]
+                x verify cov has right contents for `action_size > 1`
+        x verify BPTT doesnt fuck up the 1-step case in perf or behavior
         - or elim in favor of deeper fc network
     - try adding another fc layer
     - figure out if lstm hidden state training is working at all
@@ -99,9 +107,26 @@ the case of walker2d).
 - validate that i can bootstrap with experience replay and elite samples
     (necessary precondition for unity being a viable simulation environment)
 
-    -
+    - need a robust and rapid experimental framework before i do so!
 
 - connect to unity and validate that basic tasks can work there
+
+
+- improve perf to reasonable place
+
+    - see if GPU is any faster at this point
+    x check that `history_size = 1` recovers earlier perf
+        - unclear so far on cheetah
+        x try again on pendulum
+    x try `dynamic_rnn` for better unroll perf
+        - similar to regular rnn
+    - try reducing fc network size and see if it is responsible for most of slowdown
+    - maybe have separate run network vs bp network so running doesnt require such an insane forward eval
+    - tuning for smaller Tmax may help converge faster
+    - only accum loss gradients every `history_size` steps? since gradients are being backpropped more in this regime
+    - in BPTT maybe we are accumulating more gradient than we know what to do with (gets normalized/clipped out)
+
+
 
 ## InvertedPendulum-v1
 
@@ -228,6 +253,20 @@ Tmax = 100
 - may work better with shorter timestep-limit
 - may work better with larger networks...lots of joints to control for only 32 encoder neurons
 
+
+
+
+# with unrolled / dynamic-rnn
+
+## InvertedPendulum-v1
+
+    2016-06-09/22.46 InvertedPendulum-v1 lr=0.000700 hs=[200] lstms=[128] -- bptt-dynamic-rnn
+
+failed! interestingly.
+
+retrying with
+
+- shorter tmax=20 to hopefully be more stable??
 
 
 

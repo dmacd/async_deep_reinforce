@@ -53,7 +53,7 @@ class GymGameState(object):
 
         self.reward = 0
         self.terminal = False
-        self.s_t = np.stack((x_t, x_t, x_t, x_t), axis=1)
+        self._s_t = np.stack((x_t, x_t, x_t, x_t), axis=1)
         # self.s_t = np.stack((x_t,), axis=1)
 
     def constrain_action(self, action):
@@ -88,7 +88,17 @@ class GymGameState(object):
 
         self.reward = reward
         self.terminal = done
-        self.s_t1 = np.append(self.s_t[:, 1:], observation, axis=1)
+        self._s_t1 = np.append(self._s_t[:, 1:], observation, axis=1)
 
     def update(self):
-        self.s_t = self.s_t1
+        self._s_t = self._s_t1
+
+
+    @property
+    def s_t(self):
+        """
+        :return: observation state history vector of size [history_size, input_size]
+        """
+
+        s_t = self._s_t.transpose()
+        return s_t

@@ -28,6 +28,8 @@ from constants import RMSP_ALPHA
 from constants import GRAD_NORM_CLIP
 from constants import USE_GPU
 
+from utils import write_spinner
+
 import constants
 import gym
 import gym_game_state
@@ -88,6 +90,11 @@ parser.add_argument('--gym_env', dest='gym_env', action='store',
                     default=constants.GYM_ENV,
                     help='gym environment to use')
 
+parser.add_argument('--unity_env', dest='unity_env', action='store_true',
+                    default=False,
+                    help='gym environment to use')
+
+
 
 args = parser.parse_args()
 print "*********************************************************"
@@ -96,11 +103,43 @@ print "*********************************************************"
 
 visualize_global = args.visualize_global
 
+
+print "If it hangs, kill it: "
+print "pkill -f a3c.py"
+
+##########################################################
+# env setup
+
+def make_env(index=0):
+
+    if args.unity_env:
+
+        unity_baseport = 4440
+        port = (unity_baseport+index)
+
+
+        print "Using unity environment, base port %d, target port %d " % (unity_baseport, port)
+        # instantiante unityenv
+        import envs
+        env = envs.UnityEnv(listen_address="tcp://*:%d" % port)  # NEXT STEP: establish discovery scheme...
+
+        print "Waiting for unity env... "
+        while not env.ready:
+            write_spinner(0.1)
+
+        return env
+
+    else:
+        return gym.make(args.gym_env)
+
+
+
 ##########################################################
 ## network setup
 # global_network = GameACNetwork(ACTION_SIZE, device)
 
-env = gym.make(args.gym_env)
+# env = gym.make(args.gym_env)
+env = make_env(index=0)
 
 print("Env observation space:", env.observation_space)
 
@@ -112,6 +151,8 @@ if constants.CONTINUOUS_MODE:
     action_size = env.action_space.shape[0]
 else:
     action_size = env.action_space.n
+
+env.close() # needed so we can reuse connection 0
 
 global_network = LowDimACNetwork(continuous_mode=constants.CONTINUOUS_MODE,
                                  action_size=action_size,
@@ -139,7 +180,7 @@ for i in range(PARALLEL_SIZE):
                                       learning_rate_input,
                                       grad_applier, args.max_time_step,
                                       device = device,
-                                      environment=gym.make(args.gym_env))
+                                      environment=make_env(i)) #gym.make(args.gym_env))
   training_threads.append(training_thread)
 
 
@@ -316,7 +357,8 @@ def vis_network_thread(network):
     global global_t
 
     # init env & states
-    env = gym.make(args.gym_env)
+    # env = gym.make(args.gym_env)
+    env = make_env()
     game_state = gym_game_state.GymGameState(0, display=True, no_op_max=0, env=env)  # resets env already
     lstm_state = network.lstm_initial_state_value
 

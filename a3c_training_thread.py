@@ -164,6 +164,8 @@ class A3CTrainingThread(object):
 
             # process game
             self.game_state.process(action)
+            # s_t1 -> s_t
+            self.game_state.update() # not sure why this is separate...
 
             # receive game result
             reward = self.game_state.reward
@@ -175,9 +177,6 @@ class A3CTrainingThread(object):
             rewards.append(np.clip(reward, -1, 1000))
 
             self.local_t += 1
-
-            # s_t1 -> s_t
-            self.game_state.update()
 
             if terminal:
                 terminal_end = True
@@ -259,6 +258,10 @@ class A3CTrainingThread(object):
             a = self.local_network.feedback_action(ai)
             # a = np.zeros([self.local_network.action_size])
             # a[ai] = 1
+
+            # reshape state input
+            # no batching for now
+
 
             _, loss_summary = sess.run([self.accum_gradients, self.local_network.loss_summary_op],
                                        feed_dict=self.local_network.loss_feed_dictionary(si, a, td, R, lstm_si)
