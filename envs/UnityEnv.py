@@ -1,4 +1,6 @@
 from Queue import Queue
+import Queue as Q               # to get the Queue.Full & Empties. god python == fail
+
 import threading
 
 # ugly hacks because python blows
@@ -10,7 +12,10 @@ from gym.core import Env
 
 class UnityEnv(Env):
 
+
     def __init__(self, listen_address):
+
+        self.metadata['render.modes'] = ['human'] # since thats what unity is doing. video cap later possible too
 
         self._listen_address = listen_address
         self._action_queue = InterruptibleQueue()
@@ -35,7 +40,7 @@ class UnityEnv(Env):
 
     def _server_thread_fn(self):
         print "starting server thread for UnityEnv on %s" % self._listen_address
-        run_server(self._listen_address, lambda : self._shutdown_requested,
+        run_server(self._listen_address, lambda: self._shutdown_requested,
                    calling_env=self._server_env)
 
 
@@ -80,6 +85,8 @@ class UnityEnv(Env):
         self._action_queue.interruptible_put(action, block=True, timeout=None)
 
         ob, reward, done, info = self._get_obs()                # obs entries are tuples including reward, done, and info
+
+        # print info['scope'] + ":reward=", reward
         return ob, reward, done, info
 
     def _close(self):
@@ -102,8 +109,27 @@ class UnityEnv(Env):
         # TODO: could wait for shutdown to confirm
 
     def _reset(self):
+        print "RESET CALLED"
+        # print "observation queue has ", self._observation_queue
+
+
         self._action_queue.interruptible_put("reset", block=True, timeout=None)  # action=="reset" signals unity to reset episode
-        return self._get_obs()
+
+        # then try here
+        # try:
+        #     # while self._observation_queue.full():
+        #     self._observation_queue.get(block=True, timeout=1)
+        #     print "obs queue had stuff in it already!"
+        # except Q.Empty:
+        #     print "timed out trying to empty queue"
+
+
+        obs = self._get_obs()
+
+        if obs[2]: # i.e. still reporting terminal state. wait for another observation in that case
+            obs = self._get_obs()
+
+        return obs
 
 
     def _render(self, mode='human', close=False):
@@ -184,23 +210,32 @@ class InterruptibleQueue(Queue):
         self._interrupt_producers = True
 
 
-    def interruptible_get(self):
+    def interruptible_get(self, block=True, timeout=None):
+        # print "INTERRUPTIBLE GET: "
         while True:
             try:
-                return self.get(block=True, timeout=1000)
-            except Queue.Empty:
+                value = self.get(block=block, timeout=timeout if timeout is not None else 1)
+                # print "GET COMPLETE", value
+                return value
+            except Q.Empty:
                 pass
+
+            # print "interrupt_consumers:", self._interrupt_consumers
             if self._interrupt_consumers:
                 self._interrupt_consumers = False
                 raise QueueInterrupt()
 
-    def interruptible_put(self, value):
+
+    def interruptible_put(self, value, block=True, timeout=None):
+        # print "INTERRUPTIBLE PUT: ", value
         while True:
             try:
-                self.put(value, block=True, timeout=1000)
-            except Queue.Full:
+                self.put(value, block=block, timeout=1) #timeout=timeout if timeout is not None else 1000)
+                break
+            except Q.Full:
                 pass
 
             if self._interrupt_producers:
                 self._interrupt_producers = False
                 raise QueueInterrupt()
+        # print "PUT COMPLETE"

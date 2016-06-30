@@ -16,7 +16,6 @@ from a3c_training_thread import A3CTrainingThread
 from rmsprop_applier import RMSPropApplier
 
 #from constants import ACTION_SIZE
-from constants import PARALLEL_SIZE
 from constants import INITIAL_ALPHA_LOW
 from constants import INITIAL_ALPHA_HIGH
 from constants import INITIAL_ALPHA_LOG_RATE
@@ -92,7 +91,12 @@ parser.add_argument('--gym_env', dest='gym_env', action='store',
 
 parser.add_argument('--unity_env', dest='unity_env', action='store_true',
                     default=False,
-                    help='gym environment to use')
+                    help='listen for connections from unity env')
+
+
+parser.add_argument('--threads', dest='threads', action='store',
+                    default=constants.PARALLEL_SIZE, type=int,
+                    help='number of agents/threads to use in training')
 
 
 
@@ -141,7 +145,7 @@ def make_env(index=0):
 # env = gym.make(args.gym_env)
 env = make_env(index=0)
 
-print("Env observation space:", env.observation_space)
+print "Env observation space:", env.observation_space
 
 
 input_size = len(env.observation_space.sample().flatten())
@@ -175,12 +179,12 @@ grad_applier = RMSPropApplier(learning_rate = learning_rate_input,
                               clip_norm = GRAD_NORM_CLIP,
                               device = device)
 
-for i in range(PARALLEL_SIZE):
+for i in range(args.threads):
   training_thread = A3CTrainingThread(i, global_network, args.initial_learning_rate,
                                       learning_rate_input,
                                       grad_applier, args.max_time_step,
                                       device = device,
-                                      environment=make_env(i)) #gym.make(args.gym_env))
+                                      environment=make_env(i+1)) #gym.make(args.gym_env))
   training_threads.append(training_thread)
 
 
@@ -198,7 +202,7 @@ def setup_summaries(sess):
 
     LOG_DIR = TODAY_LOG_DIR + "/" + datetime.now().time().replace(second=0, microsecond=0).isoformat()[0:-3].replace(':', '.')
 
-    LOG_DIR += " %s" % args.gym_env
+    LOG_DIR += " %s" % env.spec.id # args.gym_env
     LOG_DIR += " lr=%f" % args.initial_learning_rate
     LOG_DIR += " hs=%s" % args.hidden_sizes
     LOG_DIR += " lstms=%s " % args.lstm_sizes
@@ -276,7 +280,7 @@ for v in vars:
 saver = tf.train.Saver() # TODO: just save/restore global net params
 
 checkpoint_name = "checkpoint"
-checkpoint_name += " %s" % args.gym_env
+checkpoint_name += " %s" % env.spec.id #args.gym_env
 checkpoint_name += " hs=%s" % args.hidden_sizes
 checkpoint_name += " lstms=%s " % args.lstm_sizes
 
@@ -296,12 +300,27 @@ else:
   print "Could not find old checkpoint"
 
 
-def save_checkpoint(name='checkpoint'):
+def restore_checkpoint(name='checkpoint', path=CHECKPOINT_DIR):
 
-    if not os.path.exists(CHECKPOINT_DIR):
-      os.mkdir(CHECKPOINT_DIR)
+    # TODO: restore named checkpoint in a safe way:
+    # - terminate all training threads first
+    # then load
+    # then resume them
 
-    saver.save(sess, CHECKPOINT_DIR + '/' + name, global_step=global_t)
+    # for now...just load the main model and call it good
+
+    pass
+
+
+def save_checkpoint(name='checkpoint', path=CHECKPOINT_DIR):
+
+    if not os.path.exists(path):
+      os.mkdir(path)
+
+    saver.save(sess, path + '/' + name, global_step=global_t)
+
+
+
 
 def should_save_checkpoint(global_t, checkpoint_every, checkpoint_count):
     return (math.floor(global_t/checkpoint_every) > checkpoint_count)
@@ -336,13 +355,18 @@ def train_function(parallel_index):
 
     
 def signal_handler(signal, frame):
-  global stop_requested
-  print ("***************************************************************************************************")
-  print('You pressed Ctrl+C!')
-  stop_requested = True
+    global stop_requested
+    print ("***************************************************************************************************")
+    print('You pressed Ctrl+C!')
+    stop_requested = True
+
+    # TODO: in order for this to be interruptible with unity shut down, need to somehow broadcast interrupt to
+    # all the environments in the training threads. plumbing.
+    # WONTFIX for now
+    # shut down python side first if want to cleanly exit
   
 train_threads = []
-for i in range(PARALLEL_SIZE):
+for i in range(args.threads):
   train_threads.append(threading.Thread(target=train_function, args=(i,)))
   
 
@@ -351,6 +375,7 @@ for i in range(PARALLEL_SIZE):
 ## visualization
 
 def vis_network_thread(network):
+
     import pyglet
 
     global stop_requested
@@ -358,7 +383,7 @@ def vis_network_thread(network):
 
     # init env & states
     # env = gym.make(args.gym_env)
-    env = make_env()
+    env = make_env(args.threads + 1)
     game_state = gym_game_state.GymGameState(0, display=True, no_op_max=0, env=env)  # resets env already
     lstm_state = network.lstm_initial_state_value
 
@@ -451,7 +476,8 @@ print('Press Ctrl+C to stop')
 
 try:
     # run vis on main thread always...yes, much better
-    vis_network_thread(global_network)
+    if not args.unity_env: # no need for vis thread if using unity
+        vis_network_thread(global_network)
 except Exception as e:
     print "exception in vis thread, exiting"
     stop_requested = True

@@ -210,11 +210,11 @@ class LowDimACNetwork(object):
 
         W_tiled = tf.tile(W_expanded, tf.pack([1, history_size, 1, 1]))
 
-        print "shape of fc input:", x.get_shape()
-        print "shape of fc weights:", W_tiled.get_shape()
-        print "shape of fc bias:", b.get_shape()
-
-        print "shape of matmul:", tf.batch_matmul(x, W_tiled).get_shape()
+        # print "shape of fc input:", x.get_shape()
+        # print "shape of fc weights:", W_tiled.get_shape()
+        # print "shape of fc bias:", b.get_shape()
+        #
+        # print "shape of matmul:", tf.batch_matmul(x, W_tiled).get_shape()
 
         y = activation(tf.batch_matmul(x, W_tiled) + b)
 
@@ -223,7 +223,7 @@ class LowDimACNetwork(object):
         self.variable_summaries(W, "W_%s" % name)
         self.variable_summaries(b, "b_%s" % name)
 
-        print "shape of fc output:", y.get_shape()
+        # print "shape of fc output:", y.get_shape()
 
 
         return W, b, y
@@ -346,20 +346,20 @@ class LowDimACNetwork(object):
 
                         # retrieve variables
                         Ws, bs = get_lstm_vars_from_scope(vs)
-                        #  we arent equipped to deal with more complex setups yet
-                        # print "lstm Ws:", Ws
+
                         # assert len(Ws) == 1
                         # assert len(bs) == 1
+
                         # manually add variable summaries
-                        print "Ws:", Ws
-                        print "bs:", bs
+                        # print "Ws:", Ws
+                        # print "bs:", bs
 
                         for W in Ws:
-                            print "Adding summaries for layer %s : %s=%s" % (layer_name, W.name, W)
+                            # print "Adding summaries for layer %s : %s=%s" % (layer_name, W.name, W)
                             self.variable_summaries(W, "W_%s_%s" % (layer_name, W.name))
 
                         for b in bs:
-                            print "Adding summaries for layer %s : %s=%s" % (layer_name, b.name, b)
+                            # print "Adding summaries for layer %s : %s=%s" % (layer_name, b.name, b)
                             self.variable_summaries(b, "b_%s_%s" % (layer_name, b.name))
 
 
@@ -555,9 +555,10 @@ class LowDimACNetwork(object):
         # TODO: verify cov has right contents for action_size > 1
 
         # cov = tf.reshape(cov, shape=(1,self._action_size, self._action_size)) # mvn needs batch index to stay
-        print "Sigma2 shape,", self.sigma2.get_shape()
-        print "cov shape,", cov.get_shape()
-        print "mu shape,", self.mu.get_shape()
+
+        # print "Sigma2 shape,", self.sigma2.get_shape()
+        # print "cov shape,", cov.get_shape()
+        # print "mu shape,", self.mu.get_shape()
         mvn = tf.contrib.distributions.MultivariateNormal(self.mu, sigma_chol=tf.sqrt(cov))
 
         sampled_action_probability = self._multivariate_normal_pdf(self.a, self.mu, self.sigma2)

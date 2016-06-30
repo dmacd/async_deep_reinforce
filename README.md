@@ -27,7 +27,7 @@ I made some modification to it to run it on multi thread enviroment.
     $ cd Arcade-Learning-Environment
     $ cmake -DUSE_SDL=ON -DUSE_RLGLUE=OFF -DBUILD_EXAMPLES=ON .
     $ make -j 4
-	
+
     $ pip install .
 
 I recommend to install it on VirtualEnv environment.
