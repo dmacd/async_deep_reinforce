@@ -20,4 +20,12 @@ def write_spinner(delay=0.1):
 
 
 
+class MutableCounter(object):
+    def __init__(self):
+        self.counter = 0
 
+    @property
+    def value(self):
+        return self.counter
+    def inc(self, v):
+        self.counter += v
