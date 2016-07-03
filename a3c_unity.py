@@ -72,8 +72,17 @@ def parse_args():
     #                     help='number of agents/threads to use in training')
 
     parser.add_argument('--listen-address', dest='listen_address', action='store',
-                        default="tcp://*:17100", type=int,
+                        default="tcp://*:17100", type=str,
                         help='listen address for command server')
+
+    parser.add_argument('--checkpoint-dir', dest='checkpoint_dir', action='store',
+                        default=constants.CHECKPOINT_DIR, type=str,
+                        help='directory from which checkpoints will be read and written')
+
+    parser.add_argument('--device', dest='device', action='store',
+                        default="/cpu:0", type=str,
+                        help='default tensorflow device')
+
 
     return parser.parse_args()
 
@@ -263,7 +272,7 @@ def start_training_threads(sess, training_nets, summary_writer, record_score_fn,
         tt['thread'].start()
 
 
-    return training_threads
+    return training_threads, training_timestep
 
 def stop_training_threads(training_threads):
 
@@ -347,6 +356,49 @@ def do_exit():
 #
 #     pass
 
+
+class ManagedAPIWrapper(object):
+
+    def __init__(self, args):
+        self._args = args
+        pass
+
+    def init(self, input_size, action_size):
+
+        global_network = init_network(args, input_size=input_size, action_size=action_size, device=args.device)
+
+        create_training_networks(args,) # should this be separate?
+
+        # next step: finish assembling the wrapper
+        # such that host doesnt have to worry about tracking any state between api calls
+
+    def start_training(self, num_threads):
+
+        # inits training networks and session if needed
+        pass
+
+    def save_checkpoint(self):
+
+        pass
+
+    def restore_checkpoint(self):
+
+        pass
+
+    def start_agent(self, port):
+
+        # inits session if not already
+        # starts an agent on port
+
+        pass
+
+
+
+    def shutdown(self):
+
+        pass
+
+
 if __name__ == "__main__":
 
     import BridgeServer
@@ -362,11 +414,11 @@ if __name__ == "__main__":
         'init_network': init_network,
         'create_training_networks': create_training_networks,       # create training threads:    training_nets = create_training_networks(args, num_threads, baseport, network, device)
         'prepare_session': prepare_session,                         # must be called after all networks created
-        'start_training_threads': start_training_threads,
+        'start_training_threads': start_training_threads,           # training_threads, training_timestep =
         'stop_training_threads': stop_training_threads,
         'AgentThreadGroup': AgentThreadGroup,                       # agents = AgentThreadGroup(args, sess, network, device)
-        'checkpoints': checkpoints,
-        'shutdown': lambda: master_server.shutdown(),               
+        'checkpoints': checkpoints,                                 # save_checkpoints(sess, global_step, name='checkpoint', path=args.checkpoint_dir)
+        'shutdown': lambda: master_server.shutdown(),
 
         # 'start_prod_thread': start_prod_thread,
         # 'stop_prod_thread': stop_prod_thread,
@@ -377,4 +429,15 @@ if __name__ == "__main__":
         # NO maybe default one just gets created by init_network?
        }
 
+
+    simple_api = {
+        'init': simple_init,
+        'start_training',
+
+
+
+    }
+
     master_server = BridgeServer.BridgeServer(args.listen_address, master_env)
+
+    master_server.join()

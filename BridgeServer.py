@@ -66,4 +66,11 @@ class BridgeServer(object):
         self._shutdown_requested = True
 
         print "BridgeServer: signaled shutdown; waiting for server thread to join..."
+
+        if threading.current_thread() != self._server_thread: # allow shutdown to be called from the server thread itself by skipping self-join
+            self._server_thread.join()
+
+    def join(self):
+        """ allow caller thread to just wait for exit if the want
+        """
         self._server_thread.join()
