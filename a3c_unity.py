@@ -5,6 +5,8 @@ import threading
 import time
 import numpy as np
 
+
+import zmq
 import signal
 import random
 import math
@@ -33,6 +35,9 @@ import argparse
 
 
 def parse_args():
+
+    # here process args are mainly for global process setup, independent of model details, however the client api is free to
+    # override/inject
 
     parser = argparse.ArgumentParser(description='Run a3c.')
     # parser.add_argument('--render', dest='visualize_global', action='store_true',
@@ -89,7 +94,7 @@ def parse_args():
 
 
 
-def make_unity_env(index=0, unity_baseport=4440):
+def make_unity_env_specific_port(index=0, unity_baseport=4440):
 
         # unity_baseport = 4440
         port = (unity_baseport+index)
@@ -103,7 +108,44 @@ def make_unity_env(index=0, unity_baseport=4440):
         while not env.ready:
             write_spinner(0.1)
 
+        env.port = unity_baseport
+        env.index = index
+
         return env
+
+
+class NoPortsAvailableError(Exception):
+    pass
+
+def make_unity_env_random_port(min_port=50000, max_port=60000, max_tries=100):
+
+    tries = 0;
+    while tries < max_tries:
+        try:
+            tries += 1
+            port = random.randrange(min_port, max_port)
+            env = make_unity_env_specific_port(index=0, unity_baseport=port)
+            return env
+        except zmq.ZMQError as e:
+            print e
+            print "Failed to bind on random port %d, retrying... (%d/%d) " % (port, tries, max_tries)
+
+    raise NoPortsAvailableError
+
+
+def make_unity_env(index=0, unity_baseport=4440):
+    """
+    :param index:
+    :param unity_baseport: base of port range, unless zero, in which case try random ports
+    :return:
+    """
+
+    if (unity_baseport == 0):
+        env = make_unity_env_random_port()
+    else:
+        env = make_unity_env_specific_port(index=index, unity_baseport=unity_baseport)
+
+    return env
 
 
 
@@ -240,7 +282,8 @@ def train_function(training_net, sess, summary_writer, record_score_fn, shutdown
         global_timestep.inc(diff_global_t)
 
 
-def start_training_threads(sess, training_nets, summary_writer, record_score_fn, shutdown_signal_callback):
+def start_training_threads(sess, training_nets, summary_writer, record_score_fn):
+    # todo?: maybe include shutdown_signal_callback param here?? unclear why i would need it
 
     training_timestep = MutableCounter()
 
@@ -249,13 +292,13 @@ def start_training_threads(sess, training_nets, summary_writer, record_score_fn,
     # def shutdown_signal_callback():
     #     return should_shutdown
 
-    def train_wrapper(training_net):
+    def train_wrapper(training_net, shutdown_cb):
 
         train_function(training_net=training_net,
                        sess=sess,
                        summary_writer=summary_writer,
                        record_score_fn=record_score_fn,
-                       shutdown_signal_callback=shutdown_signal_callback,
+                       shutdown_signal_callback=shutdown_cb,
                        global_timestep=training_timestep)
 
     training_threads = []
@@ -303,7 +346,11 @@ class AgentThreadGroup(object):
 
         self._threads = {} # port -> thread mapping
         self._should_shutdown = {} # port -> bool mapping for shutdown signals
-        self._envs = {}
+        self._envs = {} # port -> env mapping
+
+    @property
+    def ports(self):
+        return self._threads.keys()
 
     def start(self, port):
 
@@ -335,12 +382,33 @@ class AgentThreadGroup(object):
             print("Warning: no agent on port %d to stop " % port)
 
         # TODO: will need to send queue interrupts
+        # this could be triggered by monitoring a proprietary thread-local property perhaps? or a signal?
+        # or just bite bullet, do it right, plumb the signal through the queue constructors :L
+
         print("Stopping agent on port %d" % port)
         self._envs[port].close()
         self._should_shutdown[port] = True
         self._threads[port].join()
 
+        # cleanup
+        del self._threads[port]
+        del self._envs[port]
+        del self._should_shutdown[port]
+
         print("Stopped agent on port %d" % port)
+
+    def stop_all(self):
+
+        # signal shutdown to all threads at once
+        print("Stopping all agents...")
+
+        for p in self._threads:
+            self._should_shutdown[p] = True
+
+        # then wait
+        for p in self._threads:
+            self.stop(p)
+
 
 
 def do_exit():
@@ -359,44 +427,135 @@ def do_exit():
 
 class ManagedAPIWrapper(object):
 
-    def __init__(self, args):
+    """
+    TODO: error handling
+    - NoPortsAvailable
+
+    """
+
+    def __init__(self, args, input_size, action_size):
         self._args = args
-        pass
+        self._session_prepared = False
+        self._device = args.device
 
-    def init(self, input_size, action_size):
+        self._global_network = init_network(args, input_size=input_size, action_size=action_size, device=self._device)
 
-        global_network = init_network(args, input_size=input_size, action_size=action_size, device=args.device)
+        self._session = None
+        self._summary_writer = None
+        self._record_score_fn = None
 
-        create_training_networks(args,) # should this be separate?
+        self._should_shutdown_training = False
 
-        # next step: finish assembling the wrapper
-        # such that host doesnt have to worry about tracking any state between api calls
+        self._agents = None
 
-    def start_training(self, num_threads):
+
+    @property
+    def ready(self):
+        """
+        :return: is api ready to instantiate prod agents
+        """
+        return self._session is not None and self._agents is not None # and ...whatever else is needed before agents can be started and training can commence
+
+    @property
+    def training_ready(self):
+        """
+        :return: is api ready to instantiate training agents
+        """
+        return len(self._training_nets) > 0 and self.ready
+
+    @property
+    def training_ports(self):
+        """
+        :return: list of ports which have training threads running on them. allow easy reconnection without having to wrangle all the port thread ranges
+        """
+        return map(lambda e: e.port, self._training_nets)
+
+    # @property
+    # def agent_ports(self):
+    #     if self._agents is not None:
+    #         return self._agents
+
+    def init_training(self, num_threads):
+        """
+        Prepares the host for training by starting a fixed number of training threads and preparing the TF session.
+        :param num_threads:
+        :return:
+        """
+
+        self._training_nets = create_training_networks(args,
+                                                       num_threads=num_threads,
+                                                       unity_baseport=0,
+                                                       global_network=self._global_network,
+                                                       device=self._device)
+
+        # x assign thread ports randomnly (or semi-randomnly at least)
+        # x store thread ports so clients can use them to reconnect
 
         # inits training networks and session if needed
-        pass
 
-    def save_checkpoint(self):
 
-        pass
+        # if self._session :
 
-    def restore_checkpoint(self):
+        # we will have to reinit the session if the training networks have been recreated
+        # unknown what will happen to the existing one though...may result in collisions?
+        # todo: investigate how to reset TF
+        self._session, self._summary_writer, self._record_score_fn = prepare_session(args)
 
-        pass
+        # start training threads
 
-    def start_agent(self, port):
+        self._training_threads, self._training_timestep = \
+            start_training_threads(self._session,
+                               training_nets=self._training_nets,
+                               summary_writer=self._summary_writer,
+                               record_score_fn=self._record_score_fn)
+                               #,shutdown_signal_callback=lambda: self._should_shutdown_training)
 
-        # inits session if not already
-        # starts an agent on port
 
-        pass
+        return self.training_ports
 
+    def shutdown_training(self):
+        stop_training_threads(self._training_threads)
+
+    def save_checkpoint(self, name, path):
+        checkpoints.save_checkpoint(self._session, global_step=self._training_timestep,checkpoint_name=name, path=path)
+
+    def restore_checkpoint(self, name, path):
+        checkpoints.restore_checkpoint(self._session, checkpoint_name=name, path=path)
+
+
+    # expose the threadgroup api directly rather than repeat wrappers here
+    # clients can call start, stop, and threads
+    @property
+    def agents(self):
+        if self._session is None:
+            self._session, self._summary_writer, self._record_score_fn = prepare_session(args)
+
+        if self._agents is None:
+            self._agents = AgentThreadGroup(args, self._session, self._global_network, self._device)
+
+        return self._agents
+
+
+    # def start_agent(self, port):
+    #
+    #
+    #
+    #     self._agents.start(port)
+    #
+    #     # do i need to wait for readiness in some fashion??
+    #
+    # def
 
 
     def shutdown(self):
 
-        pass
+        # self._should_shutdown_training = True
+
+        # todo: wait for training threads to join
+        stop_training_threads(self._training_threads)
+
+        # wait for all agent threads to join
+        self._agents.stop_all()
 
 
 if __name__ == "__main__":
@@ -409,34 +568,43 @@ if __name__ == "__main__":
     args = parse_args()
 
     master_server = None
+
+    # expose more complex direct api, requires client to manage lots of state
+    # master_env = {
+    #     'args': args,
+    #     'init_network': init_network,
+    #     'create_training_networks': create_training_networks,       # create training threads:    training_nets = create_training_networks(args, num_threads, baseport, network, device)
+    #     'prepare_session': prepare_session,                         # must be called after all networks created
+    #     'start_training_threads': start_training_threads,           # training_threads, training_timestep =
+    #     'stop_training_threads': stop_training_threads,
+    #     'AgentThreadGroup': AgentThreadGroup,                       # agents = AgentThreadGroup(args, sess, network, device)
+    #     'checkpoints': checkpoints,                                 # save_checkpoints(sess, global_step, name='checkpoint', path=args.checkpoint_dir)
+    #     'shutdown': lambda: master_server.shutdown(),
+    #
+    #     # 'start_prod_thread': start_prod_thread,
+    #     # 'stop_prod_thread': stop_prod_thread,
+    #
+    #
+    #    }
+
+    # next step: refine unity client api...figure out how we're protecting/exposing internals like network, device, sess, et
+    # - opaque references to be passed around by the client code..ick
+    # x and how agentthreadgroups get created
+    # NO maybe default one just gets created by init_network?
+
+
+    # simplified managed api
     master_env = {
         'args': args,
-        'init_network': init_network,
-        'create_training_networks': create_training_networks,       # create training threads:    training_nets = create_training_networks(args, num_threads, baseport, network, device)
-        'prepare_session': prepare_session,                         # must be called after all networks created
-        'start_training_threads': start_training_threads,           # training_threads, training_timestep =
-        'stop_training_threads': stop_training_threads,
-        'AgentThreadGroup': AgentThreadGroup,                       # agents = AgentThreadGroup(args, sess, network, device)
-        'checkpoints': checkpoints,                                 # save_checkpoints(sess, global_step, name='checkpoint', path=args.checkpoint_dir)
-        'shutdown': lambda: master_server.shutdown(),
-
-        # 'start_prod_thread': start_prod_thread,
-        # 'stop_prod_thread': stop_prod_thread,
-
-        # next step: refine unity client api...figure out how we're protecting/exposing internals like network, device, sess, et
-        # - opaque references to be passed around by the client code
-        # x and how agentthreadgroups get created
-        # NO maybe default one just gets created by init_network?
-       }
-
-
-    simple_api = {
-        'init': simple_init,
-        'start_training',
-
-
-
+        'api': { 'managed': {'factory' : ManagedAPIWrapper,
+                             'instance' : None } }
     }
+
+    # NEXT STEP: wrap initialization state up in a factor helper so we have singleton api wrapper class
+    # or just look up python singleton pattern
+    # then write C# wrapper side
+
+    # todo: utils and server management stuff too
 
     master_server = BridgeServer.BridgeServer(args.listen_address, master_env)
 
