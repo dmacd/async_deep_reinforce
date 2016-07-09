@@ -5,6 +5,7 @@ import threading
 import time
 import numpy as np
 
+import bunch
 
 import zmq
 import signal
@@ -58,7 +59,7 @@ def parse_args():
     # parser.add_argument('--lr', dest='initial_learning_rate', action='store',
     #                     default=initial_learning_rate, type=float,
     #                     help='initial learning rate')
-    #
+
     # parser.add_argument('--max_time_step', dest='max_time_step', action='store',
     #                     default=constants.MAX_TIME_STEP, type=int,
     #                     help='max time step to run for')
@@ -94,7 +95,7 @@ def parse_args():
 
 
 
-def make_unity_env_specific_port(index=0, unity_baseport=4440):
+def make_unity_env_specific_port(index=0, unity_baseport=4440, wait_for_ready=False):
 
         # unity_baseport = 4440
         port = (unity_baseport+index)
@@ -104,9 +105,15 @@ def make_unity_env_specific_port(index=0, unity_baseport=4440):
         import envs
         env = envs.UnityEnv(listen_address="tcp://*:%d" % port)  # NEXT STEP: establish discovery scheme...
 
-        print "Waiting for unity env... "
-        while not env.ready:
-            write_spinner(0.1)
+
+        # next step: figure out whether i actually need to wait here or not...not sure that i do..*[]:
+
+        if wait_for_ready:
+            print "Waiting for unity env... "
+            while not env.ready:
+                write_spinner(0.1)
+        else:
+            print "Env created, not waiting for unity ready ack..."
 
         env.port = unity_baseport
         env.index = index
@@ -149,13 +156,13 @@ def make_unity_env(index=0, unity_baseport=4440):
 
 
 
-def init_network(args, input_size, action_size, device="/cpu:0"):
+def init_network(args, input_size, action_size, hidden_sizes, lstm_sizes, device="/cpu:0"):
 
     global_network = LowDimACNetwork(continuous_mode=constants.CONTINUOUS_MODE,
                                      action_size=action_size,
                                      input_size=input_size,
-                                     hidden_sizes=args.hidden_sizes, #[200],
-                                     lstm_sizes=args.lstm_sizes, #[128],
+                                     hidden_sizes=hidden_sizes, #[200],
+                                     lstm_sizes=lstm_sizes, #[128],
                                      network_name="global-net",
                                      device=device)
 
@@ -433,13 +440,22 @@ class ManagedAPIWrapper(object):
 
     """
 
-    def __init__(self, args, input_size, action_size):
+    def __init__(self, args): #, input_size, action_size, hidden_sizes, lstm_sizes):
         self._args = args
         self._session_prepared = False
         self._device = args.device
 
-        self._global_network = init_network(args, input_size=input_size, action_size=action_size, device=self._device)
+        print "init called..."
+        self._global_network = init_network(args,
+                                            input_size=args.input_size,
+                                            action_size=args.action_size,
+                                            hidden_sizes=args.hidden_sizes,
+                                            lstm_sizes=args.lstm_sizes,
+                                            device=self._device)
 
+        self._training_timestep = None
+        self._training_nets = None
+        self._training_threads = None
         self._session = None
         self._summary_writer = None
         self._record_score_fn = None
@@ -482,7 +498,7 @@ class ManagedAPIWrapper(object):
         :return:
         """
 
-        self._training_nets = create_training_networks(args,
+        self._training_nets = create_training_networks(self._args,
                                                        num_threads=num_threads,
                                                        unity_baseport=0,
                                                        global_network=self._global_network,
@@ -499,7 +515,7 @@ class ManagedAPIWrapper(object):
         # we will have to reinit the session if the training networks have been recreated
         # unknown what will happen to the existing one though...may result in collisions?
         # todo: investigate how to reset TF
-        self._session, self._summary_writer, self._record_score_fn = prepare_session(args)
+        self._session, self._summary_writer, self._record_score_fn = prepare_session(self._args)
 
         # start training threads
 
@@ -528,10 +544,10 @@ class ManagedAPIWrapper(object):
     @property
     def agents(self):
         if self._session is None:
-            self._session, self._summary_writer, self._record_score_fn = prepare_session(args)
+            self._session, self._summary_writer, self._record_score_fn = prepare_session(self._args)
 
         if self._agents is None:
-            self._agents = AgentThreadGroup(args, self._session, self._global_network, self._device)
+            self._agents = AgentThreadGroup(self._args, self._session, self._global_network, self._device)
 
         return self._agents
 
@@ -558,6 +574,15 @@ class ManagedAPIWrapper(object):
         self._agents.stop_all()
 
 
+def merge_dicts(x, y):
+    '''Given two dicts, merge them into a new dict as a shallow copy.'''
+    print 'merge_dicts:', x, y
+
+    z = x.copy()
+    z.update(y)
+    print "merged:", z
+    return bunch.bunchify(z)
+
 if __name__ == "__main__":
 
     import BridgeServer
@@ -565,7 +590,7 @@ if __name__ == "__main__":
     #############################################################
     ## start master bridge server
 
-    args = parse_args()
+    args = bunch.bunchify(vars(parse_args()))
 
     master_server = None
 
@@ -592,13 +617,16 @@ if __name__ == "__main__":
     # x and how agentthreadgroups get created
     # NO maybe default one just gets created by init_network?
 
+    # NEXT STEP: figure out why args arent merging
 
     # simplified managed api
-    master_env = {
+    master_env = bunch.bunchify({
         'args': args,
+        'merge_dicts': merge_dicts,         # cuz python is amazingly bad
         'api': { 'managed': {'factory' : ManagedAPIWrapper,
-                             'instance' : None } }
-    }
+                             'instance' : None } },
+        'shutdown': lambda: master_server.shutdown(),
+    })
 
     # NEXT STEP: wrap initialization state up in a factor helper so we have singleton api wrapper class
     # or just look up python singleton pattern
