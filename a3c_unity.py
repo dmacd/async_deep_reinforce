@@ -44,9 +44,9 @@ def parse_args():
     # parser.add_argument('--render', dest='visualize_global', action='store_true',
     #                     help='render the global network applied to a test environment')
     #
-    # parser.add_argument('--tag', dest='tag', action='store',
-    #                     default="",
-    #                     help='tag to label the summary data')
+    parser.add_argument('--tag', dest='tag', action='store',
+                        default="",
+                        help='tag to label the summary data')
     #
     # parser.add_argument('--hidden', dest='hidden_sizes', action='append',
     #                     default=[200],
@@ -109,7 +109,7 @@ def make_unity_env_specific_port(index=0, unity_baseport=4440, wait_for_ready=Fa
         # next step: figure out whether i actually need to wait here or not...not sure that i do..*[]:
 
         if wait_for_ready:
-            print "Waiting for unity env... "
+            print "Waiting for unity env..."
             while not env.ready:
                 write_spinner(0.1)
         else:
@@ -128,10 +128,12 @@ def make_unity_env_random_port(min_port=50000, max_port=60000, max_tries=100):
 
     tries = 0;
     while tries < max_tries:
+        # print "make unity env try ", tries
         try:
             tries += 1
             port = random.randrange(min_port, max_port)
             env = make_unity_env_specific_port(index=0, unity_baseport=port)
+            # print "made env...returning..."
             return env
         except zmq.ZMQError as e:
             print e
@@ -169,9 +171,9 @@ def init_network(args, input_size, action_size, hidden_sizes, lstm_sizes, device
     return global_network
 
 
-def create_training_networks(args, num_threads, unity_baseport, global_network, device="/cpu:0"):
+def create_training_thread_objects(args, num_threads, unity_baseport, global_network, device="/cpu:0"):
     ###########################################################
-    training_nets = []
+    training_thread_objs = [None]*num_threads
 
     learning_rate_input = tf.placeholder("float")
 
@@ -182,16 +184,47 @@ def create_training_networks(args, num_threads, unity_baseport, global_network, 
                                   clip_norm = constants.GRAD_NORM_CLIP,
                                   device = device)
 
-    for i in range(num_threads):
-        training_net = A3CTrainingThread(i, global_network, args.initial_learning_rate,
+
+
+
+    def make_thread_obj(index):
+
+        env = make_unity_env(i, unity_baseport=unity_baseport)
+
+        # horrible naming here do to lack of full encapsulation of thread operations in the so-named thread class
+        # TODO: when refactoring, move thread management and loop state in to the class
+        obj = A3CTrainingThread(i, global_network, args.initial_learning_rate,
                                             learning_rate_input,
                                             grad_applier, args.max_time_step,
                                             device=device,
-                                            environment=make_unity_env(i, unity_baseport=unity_baseport))  # gym.make(args.gym_env))
-        # TODO: include unity baseport
-        training_nets.append(training_net)
+                                            environment=env)  # gym.make(args.gym_env))
 
-    return training_nets
+        obj.port = env.port        # slight hack: cache port value with the thread
+        # TODO: include unity baseport
+        # print "created training net %d" % i
+        # training_thread_objs.append(obj)
+        training_thread_objs[index] = obj
+
+
+    # run all thread inits in parallel
+    for i in range(num_threads):
+
+        # tf.Graph is NOT thread safe. cant do this without much more care
+
+        # TODO: revisit later to make boot up time MUCH faster
+
+        make_thread_obj(i)
+        # t = threading.Thread(target=make_thread_obj, args=(i,))
+        # t.start()
+
+
+    while not all(training_thread_objs):
+        time.sleep(.5)
+
+    print "Done creating training thread objects"
+
+
+    return training_thread_objs
 
 
 def prod_thread(env, sess, network, shutdown_signal_callback):
@@ -277,19 +310,22 @@ def prepare_session(args):
 
 
 
-def train_function(training_net, sess, summary_writer, record_score_fn, shutdown_signal_callback, global_timestep):
+def train_function(training_thread_obj, sess, summary_writer, record_score_fn, shutdown_signal_callback, global_timestep):
+
+    # need to issue reset to the unity env here to force it to wait for the unity side to connect
+    training_thread_obj.reset()
 
     while True:
         if shutdown_signal_callback():
             break
 
-        diff_global_t = training_net.process(sess, global_timestep.value, summary_writer,
-                                                record_score_fn)
+        diff_global_t = training_thread_obj.process(sess, global_timestep.value, summary_writer,
+                                                    record_score_fn)
         # score_summary_op, score_input)
         global_timestep.inc(diff_global_t)
 
 
-def start_training_threads(sess, training_nets, summary_writer, record_score_fn):
+def start_training_threads(sess, training_thread_objs, summary_writer, record_score_fn):
     # todo?: maybe include shutdown_signal_callback param here?? unclear why i would need it
 
     training_timestep = MutableCounter()
@@ -299,9 +335,9 @@ def start_training_threads(sess, training_nets, summary_writer, record_score_fn)
     # def shutdown_signal_callback():
     #     return should_shutdown
 
-    def train_wrapper(training_net, shutdown_cb):
+    def train_wrapper(training_thread_obj, shutdown_cb):
 
-        train_function(training_net=training_net,
+        train_function(training_thread_obj=training_thread_obj,
                        sess=sess,
                        summary_writer=summary_writer,
                        record_score_fn=record_score_fn,
@@ -310,7 +346,7 @@ def start_training_threads(sess, training_nets, summary_writer, record_score_fn)
 
     training_threads = []
 
-    for tn in training_nets:
+    for tn in training_thread_objs:
         t = {'shutdown_requested': False} # neatly group the shutdown signal with the thread object
         t['thread'] =threading.Thread(target=train_wrapper, args=(tn, lambda: t['shutdown_requested']))
         training_threads.append(t)
@@ -454,7 +490,7 @@ class ManagedAPIWrapper(object):
                                             device=self._device)
 
         self._training_timestep = None
-        self._training_nets = None
+        self._training_thread_objs = None
         self._training_threads = None
         self._session = None
         self._summary_writer = None
@@ -470,21 +506,29 @@ class ManagedAPIWrapper(object):
         """
         :return: is api ready to instantiate prod agents
         """
-        return self._session is not None and self._agents is not None # and ...whatever else is needed before agents can be started and training can commence
+
+        print "ready:", self._session, self._agents
+        return (self._session is not None) and \
+               (self.agents is not None)
+               # (self._agents is not None)
+
+        # and ...whatever else is needed before agents can be started and training can commence
 
     @property
     def training_ready(self):
         """
         :return: is api ready to instantiate training agents
         """
-        return len(self._training_nets) > 0 and self.ready
+        return len(self._training_thread_objs) > 0 and self.ready
 
     @property
     def training_ports(self):
         """
         :return: list of ports which have training threads running on them. allow easy reconnection without having to wrangle all the port thread ranges
         """
-        return map(lambda e: e.port, self._training_nets)
+        ports =  map(lambda e: e.port, self._training_thread_objs)
+        print "training_ports", ports
+        return ports
 
     # @property
     # def agent_ports(self):
@@ -498,11 +542,12 @@ class ManagedAPIWrapper(object):
         :return:
         """
 
-        self._training_nets = create_training_networks(self._args,
-                                                       num_threads=num_threads,
-                                                       unity_baseport=0,
-                                                       global_network=self._global_network,
-                                                       device=self._device)
+        self._training_thread_objs = create_training_thread_objects(self._args,
+                                                                    num_threads=num_threads,
+                                                                    unity_baseport=0,
+                                                                    global_network=self._global_network,
+                                                                    device=self._device)
+
 
         # x assign thread ports randomnly (or semi-randomnly at least)
         # x store thread ports so clients can use them to reconnect
@@ -515,19 +560,24 @@ class ManagedAPIWrapper(object):
         # we will have to reinit the session if the training networks have been recreated
         # unknown what will happen to the existing one though...may result in collisions?
         # todo: investigate how to reset TF
-        self._session, self._summary_writer, self._record_score_fn = prepare_session(self._args)
+        self._prepare_session()
 
         # start training threads
 
         self._training_threads, self._training_timestep = \
             start_training_threads(self._session,
-                               training_nets=self._training_nets,
-                               summary_writer=self._summary_writer,
-                               record_score_fn=self._record_score_fn)
+                                   training_thread_objs=self._training_thread_objs,
+                                   summary_writer=self._summary_writer,
+                                   record_score_fn=self._record_score_fn)
                                #,shutdown_signal_callback=lambda: self._should_shutdown_training)
 
 
         return self.training_ports
+
+    def _prepare_session(self):
+                self._session, self._summary_writer, self._record_score_fn = prepare_session(self._args)
+
+
 
     def shutdown_training(self):
         stop_training_threads(self._training_threads)
@@ -544,7 +594,7 @@ class ManagedAPIWrapper(object):
     @property
     def agents(self):
         if self._session is None:
-            self._session, self._summary_writer, self._record_score_fn = prepare_session(self._args)
+            self._prepare_session()
 
         if self._agents is None:
             self._agents = AgentThreadGroup(self._args, self._session, self._global_network, self._device)

@@ -106,6 +106,13 @@ class A3CTrainingThread(object):
 
     """
 
+    def reset(self):
+
+        # todo: any other states to clean up??
+        # could have been absorbed in to a check for validity of game state...
+        # but thats kind of magic-y and icky for this scenario
+        self.game_state.reset()
+
     def process(self, sess, global_t, summary_writer, record_score_fn):  #summary_op, score_input):
         states = []
         actions = []

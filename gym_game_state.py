@@ -26,7 +26,11 @@ class GymGameState(object):
         # TODO: handle continous action spaces
         # discrete ok for now
 
-        self.reset()
+
+        # TODO: may need to restore reset once connection is live, just cant do it on the training thread
+        # in current architecture
+
+        # self.reset()
 
 
 
