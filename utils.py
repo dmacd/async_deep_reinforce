@@ -29,3 +29,5 @@ class MutableCounter(object):
         return self.counter
     def inc(self, v):
         self.counter += v
+    def reset(self, v):
+        self.counter = v

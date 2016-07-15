@@ -292,22 +292,57 @@ from summaries import setup_summaries
 def prepare_session(args):
     ############################################################################
     # prepare session
-    sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
+    sess = tf.Session(config=tf.ConfigProto(log_device_placement=True,
+                                            device_count={'GPU': 0}             # force disable GPU
+                                            ))
 
     env_id = "Unity-online-please-take-from-script"
     summary_writer, record_score_fn = setup_summaries(sess, env_id, args)
 
+    # setup training_timestep tracker
+
+    training_timestep = tf.Variable(0, name="training_timestep", dtype="float", trainable=False)
+    # slightly better? pattern here...but would require surgery on the training process:
+    # http://stackoverflow.com/questions/36113090/tensorflow-get-the-global-step-when-restoring-checkpoints
+
     init = tf.initialize_all_variables()
     sess.run(init)
 
+    return sess, summary_writer, record_score_fn, training_timestep
+
+
+def run_update_var(sess, var, value):
+    """ Helper to update vars manually in a live session
+    :param sess:
+    :param var:
+    :param value:
+    :return:
+    """
+    assign_op = var.assign(value)
+    sess.run(assign_op)
+
+
+def init_saver(args, global_network, global_step=None):
+
     # debug
-    # vars = tf.get_collection(tf.GraphKeys.VARIABLES)
-    # for v in vars:
-    #     print v.name
+    print "--------------------------------------"
+    print "All graph variables:"
+    vars = tf.get_collection(tf.GraphKeys.VARIABLES)
+    for v in vars:
+        print v.name
 
-    return sess, summary_writer, record_score_fn
+    var_list = global_network.get_vars()
+    if (global_step is not None):
+        var_list.append(global_step)
 
+    print "--------------------------------------"
+    print "Variables to save:"
+    for v in var_list:
+        print v.name
 
+    saver = tf.train.Saver(var_list)  # todo: restrict to just global net vars
+
+    return saver
 
 
 def train_function(training_thread_obj, sess, summary_writer, record_score_fn, shutdown_signal_callback, global_timestep):
@@ -490,6 +525,7 @@ class ManagedAPIWrapper(object):
                                             device=self._device)
 
         self._training_timestep = None
+        self._training_timestep_var = None # TODO: CLEANUP: remove the redundant counter and store it in the graph just with this var
         self._training_thread_objs = None
         self._training_threads = None
         self._session = None
@@ -499,6 +535,7 @@ class ManagedAPIWrapper(object):
         self._should_shutdown_training = False
 
         self._agents = None
+        self._saver = None
 
 
     @property
@@ -575,18 +612,33 @@ class ManagedAPIWrapper(object):
         return self.training_ports
 
     def _prepare_session(self):
-                self._session, self._summary_writer, self._record_score_fn = prepare_session(self._args)
-
-
+        self._session, self._summary_writer, self._record_score_fn, self._training_timestep_var = prepare_session(self._args)
+        self._saver = init_saver(self._args, self._global_network, self._training_timestep_var)
 
     def shutdown_training(self):
         stop_training_threads(self._training_threads)
 
     def save_checkpoint(self, name, path):
-        checkpoints.save_checkpoint(self._session, global_step=self._training_timestep,checkpoint_name=name, path=path)
+
+        run_update_var(self._session, self._training_timestep_var, self._training_timestep.value)
+        print "saving checkpoint for training timestep %d" % self._training_timestep_var.eval(session=self._session)
+        checkpoints.save_checkpoint(self._session,
+                                    saver=self._saver,
+                                    #global_step=self._training_timestep.value,
+                                    global_step=self._training_timestep_var,
+                                    checkpoint_name=name,
+                                    path=path)
 
     def restore_checkpoint(self, name, path):
-        checkpoints.restore_checkpoint(self._session, checkpoint_name=name, path=path)
+        checkpoints.restore_checkpoint(self._session, saver=self._saver, checkpoint_name=name, path=path)
+
+        # timestep should have been restored...so copy back to our counter
+        self._training_timestep.reset(self._training_timestep_var.eval(session=self._session))
+
+        print "restored checkpoint for training timestep %d" % self._training_timestep.value
+
+
+
 
 
     # expose the threadgroup api directly rather than repeat wrappers here
@@ -634,6 +686,9 @@ def merge_dicts(x, y):
     return bunch.bunchify(z)
 
 if __name__ == "__main__":
+
+    # TODO: wrap in function to prevent local vars here from accidentally being referred as global
+    # in sub-functions
 
     import BridgeServer
 
